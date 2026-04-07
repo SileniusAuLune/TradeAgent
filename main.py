@@ -24,8 +24,9 @@ from rich.text import Text
 load_dotenv()
 
 # Local modules
-from market_data import fetch_market_data
+from market_data import fetch_market_data, is_forex
 from technical import calculate_indicators
+from fundamental import fetch_stock_fundamentals, fetch_market_context
 from agent import TradingAgent
 
 console = Console()
@@ -84,6 +85,16 @@ def analyse_symbol(symbol: str, agent: TradingAgent) -> None:
         console.print(f"[bold red]✗ Indicator error: {exc}[/bold red]")
         return
 
+    # ── Fetch fundamentals & market context (best-effort, never fatal) ─────
+    asset_is_forex = market_data["asset_type"] == "Forex"
+    fundamentals   = {}
+    market_ctx     = {}
+
+    console.print(f"[dim]Fetching market context…[/dim]", end="\r")
+    if not asset_is_forex:
+        fundamentals = fetch_stock_fundamentals(market_data["yf_symbol"])
+    market_ctx = fetch_market_context(symbol, is_forex=asset_is_forex)
+
     # ── Summary banner ─────────────────────────────────────────────────────
     pct = market_data["pct_change"]
     color = _signal_color(pct)
@@ -119,12 +130,20 @@ def analyse_symbol(symbol: str, agent: TradingAgent) -> None:
     )
 
     # ── Claude analysis ────────────────────────────────────────────────────
+    # ── Summary of extra data fetched ─────────────────────────────────────
+    extras = []
+    if fundamentals:
+        extras.append(f"[green]{len(fundamentals)} fundamental fields[/green]")
+    if market_ctx:
+        extras.append(f"[green]{len(market_ctx)} market context fields[/green]")
+    extra_str = " · ".join(extras) if extras else "[dim]none (network restricted)[/dim]"
+
     console.print(
         f"\n[bold yellow]Claude claude-opus-4-6 Analysis[/bold yellow] "
-        f"[dim](streaming with adaptive thinking…)[/dim]\n"
+        f"[dim](adaptive thinking · extras: {extra_str})[/dim]\n"
     )
 
-    agent.analyze(market_data, indicators)
+    agent.analyze(market_data, indicators, fundamentals, market_ctx)
 
     console.print(f"\n[dim]Analysis complete for {symbol.upper()}[/dim]")
 
