@@ -26,34 +26,42 @@ DEFAULT_STRATEGY: Dict[str, Any] = {
     "last_updated"     : date.today().isoformat(),
     "update_count"     : 0,
 
-    # Agent loop thresholds
-    "min_score_threshold" : 45.0,   # minimum scanner score to consider trading
-    "stop_loss_pct"       : 3.0,    # % below entry to auto-exit
-    "take_profit_pct"     : 8.0,    # % above entry to auto-exit
-    "max_position_pct"    : 8.0,    # max % of equity per trade
-    "max_open_positions"  : 5,
+    # ── Short-term momentum defaults ──────────────────────────────────────
+    # Goal: capture 6-12% moves in 2-7 days, cut losers fast at 2.5%,
+    # redeploy capital into the next strong setup immediately.
+    "min_score_threshold" : 52.0,   # only the cleanest setups
+    "stop_loss_pct"       : 2.5,    # tight — protect capital, redeploy fast
+    "take_profit_pct"     : 10.0,   # aim for 4:1 R:R on strong moves
+    "max_position_pct"    : 10.0,   # concentrate into winners
+    "max_open_positions"  : 4,      # fewer, higher-conviction positions
 
-    # Scanner weight multipliers (1.0 = default, higher = more weight)
+    # Scanner weight multipliers — volume and momentum weighted higher
+    # for short-term because price follows unusual activity
     "scanner_weights": {
         "trend"           : 1.0,
-        "adx"             : 1.0,
+        "adx"             : 1.2,    # strong trend = more reliable
         "rsi"             : 1.0,
         "macd"            : 1.0,
-        "volume"          : 1.0,
-        "bb_squeeze"      : 1.0,
+        "volume"          : 1.5,    # volume surge is the strongest ST signal
+        "bb_squeeze"      : 1.3,    # squeeze + breakout = explosive move
         "market_structure": 1.0,
-        "weekly_trend"    : 1.0,
+        "weekly_trend"    : 0.8,    # weekly matters less for 2-7 day holds
     },
 
     # Universe filters
-    "avoid_symbols"      : [],   # never trade these
-    "preferred_symbols"  : [],   # boost score for these
-    "avoid_sectors"      : [],   # skip tickers in these sectors
+    "avoid_symbols"      : [],
+    "preferred_symbols"  : [],
+    "avoid_sectors"      : [],
 
-    # Prompt additions — appended to agent & loop system prompts
-    "prompt_additions"   : "",
+    # Prompt additions — short-term focus baked in from day one
+    "prompt_additions"   : (
+        "This is a SHORT-TERM momentum strategy targeting 2-7 day swing trades. "
+        "Prioritize: high relative volume (2x+), ADX above 25, clean trend structure. "
+        "Cut losers fast at stop — do not hold through weakness hoping for recovery. "
+        "Take partial profits at Target 1 and trail the rest."
+    ),
 
-    # Change history (last 30 updates)
+    # Change history
     "history"            : [],
 }
 

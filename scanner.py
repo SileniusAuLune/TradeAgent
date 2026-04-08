@@ -33,31 +33,68 @@ UNIVERSE_HIGH_BETA = [
     "SOXL", "TQQQ", "UPRO",
 ]
 
+# Short-term swing universe: liquid momentum names with high ATR
+# Best for 2-7 day holds targeting 6-12% moves
+UNIVERSE_SHORT_TERM = [
+    # Mega-cap momentum
+    "NVDA", "TSLA", "META", "AAPL", "AMD", "MSFT",
+    # High-beta momentum
+    "SMCI", "PLTR", "MSTR", "COIN", "HOOD", "SOFI",
+    # Sector ETFs for broader reads
+    "SOXS", "SOXL", "TQQQ", "LABU", "FNGU",
+    # Market leaders
+    "GOOGL", "AMZN", "NFLX", "CRM", "SHOP",
+]
+
 UNIVERSES = {
-    "Momentum (default)": UNIVERSE_MOMENTUM,
-    "Large Cap"         : UNIVERSE_LARGE_CAP,
-    "High Beta"         : UNIVERSE_HIGH_BETA,
+    "Short-Term Swing (recommended)": UNIVERSE_SHORT_TERM,
+    "Momentum"                       : UNIVERSE_MOMENTUM,
+    "Large Cap"                      : UNIVERSE_LARGE_CAP,
+    "High Beta"                      : UNIVERSE_HIGH_BETA,
 }
 
 
 @dataclass
 class ScanResult:
-    symbol        : str
-    price         : float
-    pct_change    : float
-    asset_type    : str
-    trend         : str
-    rsi           : float
-    macd_bullish  : bool
-    volume_ratio  : float
-    adx           : float
-    bb_squeeze    : bool
-    atr_pct       : float
+    symbol          : str
+    price           : float
+    pct_change      : float
+    asset_type      : str
+    trend           : str
+    rsi             : float
+    macd_bullish    : bool
+    volume_ratio    : float
+    adx             : float
+    bb_squeeze      : bool
+    atr_pct         : float
     market_structure: str
-    score         : float = 0.0
-    signal        : str   = "NEUTRAL"
-    reasons       : List[str] = field(default_factory=list)
-    error         : Optional[str] = None
+    gap_pct         : float = 0.0   # today's open vs prior close (+ = gap up)
+    rs_vs_spy       : float = 0.0   # relative strength: ticker 5d - SPY 5d %
+    score           : float = 0.0
+    signal          : str   = "NEUTRAL"
+    reasons         : List[str] = field(default_factory=list)
+    error           : Optional[str] = None
+
+
+# Cache SPY 5-day performance so we only fetch it once per scan run
+_spy_5d_perf: Optional[float] = None
+
+
+def _get_spy_perf() -> float:
+    """Return SPY's 5-day % change, cached for the scan run."""
+    global _spy_5d_perf
+    if _spy_5d_perf is not None:
+        return _spy_5d_perf
+    try:
+        md = fetch_market_data("SPY", period="1mo")
+        df = md["dataframe"]
+        if len(df) >= 5:
+            _spy_5d_perf = float((df["Close"].iloc[-1] / df["Close"].iloc[-5] - 1) * 100)
+        else:
+            _spy_5d_perf = 0.0
+    except Exception:
+        _spy_5d_perf = 0.0
+    return _spy_5d_perf
 
 
 _current_weights: Dict[str, float] = {}   # set by run_scan from strategy
@@ -68,6 +105,20 @@ def _scan_one(symbol: str) -> ScanResult:
     try:
         md  = fetch_market_data(symbol, period="3mo")
         ind = calculate_indicators(md["dataframe"])
+        df  = md["dataframe"]
+
+        # Gap detection: today's open vs prior close
+        gap_pct = 0.0
+        if len(df) >= 2:
+            prev_close = float(df["Close"].iloc[-2])
+            today_open = float(df["Open"].iloc[-1])
+            if prev_close > 0:
+                gap_pct = round((today_open / prev_close - 1) * 100, 2)
+
+        # Relative strength vs SPY (5-day)
+        spy_perf  = _get_spy_perf()
+        tick_5d   = ind.get("perf_5d") or 0.0
+        rs_vs_spy = round(float(tick_5d) - spy_perf, 2)
 
         result = ScanResult(
             symbol          = symbol,
@@ -82,6 +133,8 @@ def _scan_one(symbol: str) -> ScanResult:
             bb_squeeze      = bool(ind.get("bb_squeeze")),
             atr_pct         = float(ind.get("atr_pct") or 0),
             market_structure= ind.get("market_structure", "N/A"),
+            gap_pct         = gap_pct,
+            rs_vs_spy       = rs_vs_spy,
         )
 
         result.score, result.signal, result.reasons = _score(result, ind, _current_weights)
@@ -168,19 +221,35 @@ def _score(r: ScanResult, ind: Dict[str, Any], weights: Optional[Dict[str, float
     if ind.get("weekly_trend") and "Up" in str(ind.get("weekly_trend", "")):
         score += 5 * wt("weekly_trend");  reasons.append("Weekly uptrend confirmation")
 
+    # ── Gap-up detection (0–12 pts) — strong short-term signal ───────────
+    if r.gap_pct >= 3:
+        score += 12; reasons.append(f"+{r.gap_pct:.1f}% gap up — strong catalyst")
+    elif r.gap_pct >= 1:
+        score += 6;  reasons.append(f"+{r.gap_pct:.1f}% gap up")
+    elif r.gap_pct <= -3:
+        score -= 8;  reasons.append(f"{r.gap_pct:.1f}% gap down — avoid")
+
+    # ── Relative strength vs SPY (0–10 pts) — leader, not laggard ────────
+    if r.rs_vs_spy >= 5:
+        score += 10; reasons.append(f"RS vs SPY: +{r.rs_vs_spy:.1f}% — sector leader")
+    elif r.rs_vs_spy >= 2:
+        score += 5;  reasons.append(f"RS vs SPY: +{r.rs_vs_spy:.1f}%")
+    elif r.rs_vs_spy <= -5:
+        score -= 5;  reasons.append(f"RS vs SPY: {r.rs_vs_spy:.1f}% — underperformer")
+
     # ── Signal label ──────────────────────────────────────────────────────
-    if score >= 60:
+    if score >= 65:
         signal = "STRONG BUY"
-    elif score >= 40:
+    elif score >= 45:
         signal = "BUY"
-    elif score >= 20:
+    elif score >= 25:
         signal = "WATCH"
     elif score <= 0:
         signal = "AVOID"
     else:
         signal = "NEUTRAL"
 
-    return round(score, 1), signal, reasons[:4]  # top 4 reasons
+    return round(score, 1), signal, reasons[:5]  # top 5 reasons
 
 
 def run_scan(
@@ -196,8 +265,9 @@ def run_scan(
     Returns top_n results sorted by score (highest first).
     weights/avoid_symbols/preferred_symbols come from StrategyManager.
     """
-    global _current_weights
+    global _current_weights, _spy_5d_perf
     _current_weights = weights or {}
+    _spy_5d_perf     = None   # reset cache so SPY is fetched fresh each scan
 
     avoid  = {s.upper() for s in (avoid_symbols or [])}
     prefer = {s.upper() for s in (preferred_symbols or [])}

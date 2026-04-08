@@ -209,11 +209,40 @@ class AgentLoop:
         self._status = "stopped"
         log.info("AgentLoop stopped after %d cycles", self._cycle_count)
 
+    @staticmethod
+    def _market_is_open() -> bool:
+        """
+        Returns True if US equity markets are currently open (9:30–16:00 ET, Mon–Fri).
+        Falls back to True if pytz is unavailable.
+        """
+        try:
+            import pytz
+            et  = pytz.timezone("US/Eastern")
+            now = datetime.now(et)
+            if now.weekday() >= 5:   # Saturday=5, Sunday=6
+                return False
+            t = now.time()
+            from datetime import time as _time
+            return _time(9, 30) <= t < _time(16, 0)
+        except Exception:
+            return True   # assume open if we can't check
+
     def _cycle(self):
         self._cycle_count += 1
         cycle_ts = datetime.now().strftime("%H:%M:%S")
         self._last_cycle = cycle_ts
         log.info("── Cycle %d @ %s ──", self._cycle_count, cycle_ts)
+
+        # ── Market hours check — skip new entries outside 9:30–16:00 ET ───
+        market_open = self._market_is_open()
+        if not market_open:
+            self._status = f"market closed (last: {cycle_ts})"
+            log.info("Market closed — checking exits only")
+            # Still check exits (in case a stop was hit on a foreign exchange
+            # or we need to clean up), but don't open new positions
+            self._check_exits()
+            return
+
         self._status = f"scanning ({cycle_ts})"
 
         # ── 0. Loss-limit check — pause before doing anything ─────────────

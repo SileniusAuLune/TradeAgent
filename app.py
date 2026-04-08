@@ -33,6 +33,7 @@ from scanner import run_scan, build_scan_prompt, UNIVERSES, UNIVERSE_MOMENTUM
 from trade_loop import AgentLoop
 from schwab_client import SchwabClient, setup_guide
 from daily_review import stream_review, list_past_reviews
+from monthly_summary import stream_monthly_summary, save_monthly_summary, list_monthly_summaries
 
 # ── Custom CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -728,6 +729,8 @@ with tab_scanner:
                     rc4.markdown(
                         f"Score: **{r.score:.0f}**  \n"
                         f"RSI {r.rsi:.0f} · Vol {r.volume_ratio:.1f}x · ADX {r.adx:.0f}"
+                        + (f" · Gap {r.gap_pct:+.1f}%" if abs(r.gap_pct) >= 0.5 else "")
+                        + (f" · RS {r.rs_vs_spy:+.1f}%" if abs(r.rs_vs_spy) >= 1 else "")
                     )
                     rc5.markdown(f"_{reasons_str}_")
                 st.divider()
