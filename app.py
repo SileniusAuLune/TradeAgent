@@ -31,6 +31,8 @@ from agent import TradingAgent, build_context
 from paper_trader import PaperTrader
 from scanner import run_scan, build_scan_prompt, UNIVERSES, UNIVERSE_MOMENTUM
 from trade_loop import AgentLoop
+from schwab_client import SchwabClient, setup_guide
+from daily_review import stream_review, list_past_reviews
 
 # ── Custom CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -79,9 +81,13 @@ def _init_state():
         "paper_trader"    : PaperTrader(),
         "trade_msg"       : None,
         "active_tab"      : "Analysis",
-        "agent_loop"      : None,
-        "scan_results"    : [],
+        "agent_loop"        : None,
+        "scan_results"      : [],
         "scan_claude_output": "",
+        "live_mode"         : False,
+        "schwab_client"     : None,
+        "schwab_status"     : "disconnected",   # disconnected | connecting | connected | error
+        "schwab_error"      : "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -108,6 +114,52 @@ def _pct_badge(pct: float) -> str:
     sign  = "+" if pct >= 0 else ""
     color = "#00d4aa" if pct >= 0 else "#ff6b6b"
     return f'<span style="color:{color};font-weight:bold">{sign}{pct:.2f}%</span>'
+
+
+def _is_live() -> bool:
+    return st.session_state.get("live_mode", False) and \
+           st.session_state.get("schwab_client") is not None
+
+
+def _schwab() -> Optional[SchwabClient]:
+    return st.session_state.get("schwab_client")
+
+
+def _execute_trade(symbol: str, action: str, shares: int, price: float,
+                   signal: str = "", note: str = "") -> Dict[str, Any]:
+    """
+    Route a trade to paper or live (Schwab) depending on current mode.
+    Returns a result dict. Raises on failure.
+    """
+    if _is_live():
+        sc = _schwab()
+        result = sc.place_order(symbol, action, shares, order_type="MARKET")
+        # Mirror in paper account so portfolio tab stays in sync
+        if action == "BUY":
+            st.session_state["paper_trader"].buy(symbol, shares, price,
+                                                  signal=signal, note=f"[LIVE] {note}")
+        else:
+            try:
+                st.session_state["paper_trader"].sell(symbol, shares, price,
+                                                       note=f"[LIVE] {note}")
+            except ValueError:
+                pass  # position may not exist in paper account
+        result["mode"] = "LIVE"
+        return result
+    else:
+        pt = st.session_state["paper_trader"]
+        if action == "BUY":
+            result = pt.buy(symbol, shares, price, signal=signal, note=note)
+        else:
+            result = pt.sell(symbol, shares, price, note=note)
+        result["mode"] = "PAPER"
+        return result
+
+
+def _mode_badge() -> str:
+    if _is_live():
+        return '<span style="background:#ff4444;color:white;padding:2px 10px;border-radius:4px;font-weight:bold;font-size:0.85rem">🔴 LIVE</span>'
+    return '<span style="background:#2a5298;color:white;padding:2px 10px;border-radius:4px;font-weight:bold;font-size:0.85rem">📝 PAPER</span>'
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -161,13 +213,84 @@ with st.sidebar:
 
     st.divider()
 
-    # Paper account mini-summary
-    st.subheader("Paper Account")
-    pt = st.session_state["paper_trader"]
-    pf = pt.get_portfolio()
-    ret_color = "#00d4aa" if pf["total_return"] >= 0 else "#ff6b6b"
-    sign      = "+" if pf["total_return"] >= 0 else ""
-    st.markdown(f"""
+    # ── Trading mode switcher ──────────────────────────────────────────────
+    st.subheader("Trading Mode")
+    st.markdown(_mode_badge(), unsafe_allow_html=True)
+    st.write("")
+
+    mode_choice = st.radio(
+        "Mode",
+        ["Paper Trading", "Live Trading (Schwab)"],
+        index=1 if st.session_state["live_mode"] else 0,
+        label_visibility="collapsed",
+        key="sidebar_mode_radio",
+    )
+
+    if mode_choice == "Paper Trading" and st.session_state["live_mode"]:
+        st.session_state["live_mode"]     = False
+        st.session_state["schwab_client"] = None
+        st.session_state["schwab_status"] = "disconnected"
+        st.rerun()
+
+    if mode_choice == "Live Trading (Schwab)":
+        schwab_status = st.session_state["schwab_status"]
+
+        if schwab_status == "connected":
+            st.success("Schwab connected", icon="✅")
+            if st.button("Disconnect", key="sb_disconnect", use_container_width=True):
+                st.session_state["live_mode"]     = False
+                st.session_state["schwab_client"] = None
+                st.session_state["schwab_status"] = "disconnected"
+                st.rerun()
+        elif schwab_status == "error":
+            st.error(st.session_state.get("schwab_error", "Auth failed"), icon="❌")
+            if st.button("Retry", key="sb_retry", use_container_width=True):
+                st.session_state["schwab_status"] = "disconnected"
+                st.rerun()
+        else:
+            schwab_key    = os.getenv("SCHWAB_API_KEY", "").strip()
+            schwab_secret = os.getenv("SCHWAB_API_SECRET", "").strip()
+
+            if not schwab_key or not schwab_secret:
+                st.warning("Add SCHWAB_API_KEY and SCHWAB_API_SECRET to your .env file.", icon="⚠️")
+            else:
+                if st.button("Connect to Schwab", type="primary",
+                             key="sb_connect", use_container_width=True):
+                    with st.spinner("Authenticating…"):
+                        try:
+                            sc = SchwabClient()
+                            sc.authenticate()
+                            st.session_state["schwab_client"] = sc
+                            st.session_state["schwab_status"] = "connected"
+                            st.session_state["live_mode"]     = True
+                            st.session_state["schwab_error"]  = ""
+                        except Exception as exc:
+                            st.session_state["schwab_status"] = "error"
+                            st.session_state["schwab_error"]  = str(exc)[:200]
+                    st.rerun()
+
+    st.divider()
+
+    # Account mini-summary
+    if _is_live():
+        try:
+            sc_info = _schwab().get_account_info()
+            st.caption("Schwab Live Account")
+            st.markdown(f"""
+| | |
+|---|---|
+| Cash | **${sc_info['cash_available']:,.2f}** |
+| Total Value | **${sc_info['total_value']:,.2f}** |
+""", unsafe_allow_html=True)
+        except Exception:
+            st.caption("Schwab account (refresh for balance)")
+    else:
+        st.subheader("Paper Account")
+        pt = st.session_state["paper_trader"]
+        pf = pt.get_portfolio()
+        ret_color = "#00d4aa" if pf["total_return"] >= 0 else "#ff6b6b"
+        sign      = "+" if pf["total_return"] >= 0 else ""
+        st.markdown(f"""
 | | |
 |---|---|
 | Cash | **${pf['cash_balance']:,.2f}** |
@@ -179,8 +302,8 @@ with st.sidebar:
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_analysis, tab_portfolio, tab_history, tab_scanner, tab_loop = st.tabs(
-    ["Analysis", "Portfolio", "Trade History", "Scanner 🔍", "Agent Loop 🤖"]
+tab_analysis, tab_portfolio, tab_history, tab_scanner, tab_loop, tab_review = st.tabs(
+    ["Analysis", "Portfolio", "Trade History", "Scanner 🔍", "Agent Loop 🤖", "Daily Review 📋"]
 )
 
 
@@ -287,52 +410,56 @@ with tab_analysis:
             st.markdown("### Claude Analysis")
             st.markdown(result)
 
-            # ── Paper trade buttons ─────────────────────────────────────────
+            # ── Trade buttons ───────────────────────────────────────────────
             if not is_fx:
                 st.divider()
-                st.markdown("#### Paper Trade This Signal")
+                mode_label = "Live" if _is_live() else "Paper"
+                st.markdown(
+                    f"#### Trade This Signal &nbsp; {_mode_badge()}",
+                    unsafe_allow_html=True,
+                )
+                if _is_live():
+                    st.warning("⚠️ LIVE MODE — this will place a real order with Schwab.", icon="⚠️")
+
                 trade_col1, trade_col2, trade_col3 = st.columns([1, 1, 2])
                 buy_shares  = trade_col3.number_input("Shares", min_value=1, value=10, step=1, key="buy_shares_input")
-                buy_clicked = trade_col1.button("Buy (Paper)", type="primary", key="buy_btn")
-                sel_clicked = trade_col2.button("Sell (Paper)", key="sell_btn")
+                buy_clicked = trade_col1.button(f"Buy ({mode_label})", type="primary", key="buy_btn")
+                sel_clicked = trade_col2.button(f"Sell ({mode_label})", key="sell_btn")
 
                 current_price = md["current_price"]
 
                 if buy_clicked:
                     try:
-                        trade = st.session_state["paper_trader"].buy(
-                            symbol=symbol,
-                            shares=float(buy_shares),
-                            price=current_price,
+                        trade = _execute_trade(
+                            symbol, "BUY", int(buy_shares), current_price,
                             signal="BUY",
-                            note=f"Paper trade via UI at {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                            note=f"UI trade {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                         )
                         st.success(
-                            f"Bought {buy_shares} shares of {symbol} @ ${current_price:,.2f} "
-                            f"(cost: ${trade['amount']:,.2f})",
-                            icon="✅"
+                            f"[{trade['mode']}] Bought {buy_shares}× {symbol} "
+                            f"@ ${current_price:,.2f}",
+                            icon="✅",
                         )
                         st.rerun()
-                    except ValueError as e:
+                    except Exception as e:
                         st.error(str(e))
 
                 if sel_clicked:
                     try:
-                        trade = st.session_state["paper_trader"].sell(
-                            symbol=symbol,
-                            shares=float(buy_shares),
-                            price=current_price,
-                            note=f"Paper trade via UI at {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                        trade = _execute_trade(
+                            symbol, "SELL", int(buy_shares), current_price,
+                            note=f"UI trade {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                         )
                         pnl = trade.get("realised_pnl", 0)
                         sign = "+" if pnl >= 0 else ""
                         st.success(
-                            f"Sold {buy_shares} shares of {symbol} @ ${current_price:,.2f} "
-                            f"(P&L: {sign}${pnl:,.2f})",
-                            icon="✅"
+                            f"[{trade['mode']}] Sold {buy_shares}× {symbol} "
+                            f"@ ${current_price:,.2f}"
+                            + (f"  P&L: {sign}${pnl:,.2f}" if pnl else ""),
+                            icon="✅",
                         )
                         st.rerun()
-                    except ValueError as e:
+                    except Exception as e:
                         st.error(str(e))
             else:
                 st.caption("Paper trading is available for stocks only (not forex).")
@@ -623,9 +750,14 @@ with tab_scanner:
 
                 st.session_state["scan_claude_output"] = "".join(full_text)
 
-                # ── Quick paper trade from scanner ──────────────────────────
+                # ── Quick trade from scanner ────────────────────────────────
                 st.divider()
-                st.subheader("Paper Trade a Scanner Pick")
+                st.markdown(
+                    f"#### Trade a Scanner Pick &nbsp; {_mode_badge()}",
+                    unsafe_allow_html=True,
+                )
+                if _is_live():
+                    st.warning("⚠️ LIVE MODE — real Schwab order.", icon="⚠️")
                 qc1, qc2, qc3, qc4 = st.columns([2, 1, 2, 1])
                 q_sym    = qc1.selectbox(
                     "Symbol",
@@ -644,18 +776,17 @@ with tab_scanner:
 
                 if q_buy:
                     try:
-                        t = st.session_state["paper_trader"].buy(
-                            q_sym, float(q_shares), q_price,
+                        t = _execute_trade(
+                            q_sym, "BUY", int(q_shares), q_price,
                             signal="BUY",
                             note=f"Scanner pick — {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                         )
                         st.success(
-                            f"Bought {q_shares}× {q_sym} @ ${q_price:.2f}  "
-                            f"(cost: ${t['amount']:,.2f})",
+                            f"[{t['mode']}] Bought {q_shares}× {q_sym} @ ${q_price:.2f}",
                             icon="✅",
                         )
                         st.rerun()
-                    except ValueError as e:
+                    except Exception as e:
                         st.error(str(e))
 
     elif st.session_state.get("scan_claude_output"):
@@ -676,7 +807,10 @@ with tab_scanner:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_loop:
-    st.markdown("## Autonomous Agent Loop")
+    st.markdown(
+        f"## Autonomous Agent Loop &nbsp; {_mode_badge()}",
+        unsafe_allow_html=True,
+    )
     st.caption(
         "Claude scans the market on a schedule and executes paper trades automatically. "
         "The loop pauses itself if your loss limits are breached."
@@ -759,6 +893,14 @@ with tab_loop:
     if start_btn:
         if not _api_key():
             st.error("Set ANTHROPIC_API_KEY in .env first.")
+        elif _is_live() and not st.session_state.get("loop_live_confirmed"):
+            # Require an extra confirm click before starting a live loop
+            st.session_state["loop_live_confirmed"] = False
+            st.warning(
+                "⚠️ You are in **LIVE MODE**. The loop will place real Schwab orders automatically. "
+                "Click **Confirm & Start Live Loop** to proceed.",
+                icon="⚠️",
+            )
         else:
             symbols = (
                 [s.upper() for s in cfg_custom_syms.split() if s.strip()]
@@ -777,12 +919,22 @@ with tab_loop:
                 take_profit_pct     = cfg_target,
                 max_drawdown_pct    = cfg_max_dd,
                 max_loss_usd        = cfg_max_loss,
-                live_mode           = False,
+                live_mode           = _is_live(),
+                schwab_client       = _schwab(),
             )
             new_loop.start()
             st.session_state["agent_loop"] = new_loop
-            st.success("Agent loop started!", icon="🤖")
+            st.session_state["loop_live_confirmed"] = False
+            mode_str = "LIVE" if _is_live() else "paper"
+            st.success(f"Agent loop started in {mode_str} mode!", icon="🤖")
             st.rerun()
+
+    # Extra confirm button for live loop
+    if _is_live() and not (loop and loop.is_running):
+        if st.session_state.get("loop_live_confirmed") is False and start_btn:
+            if st.button("Confirm & Start Live Loop", type="primary", key="loop_live_confirm_btn"):
+                st.session_state["loop_live_confirmed"] = True
+                st.rerun()
 
     if stop_btn and loop:
         loop.stop()
@@ -861,3 +1013,102 @@ with tab_loop:
         "5. Monitors all open positions for stop-loss and take-profit hits  \n"
         "6. **Pauses immediately** if your drawdown or loss cap is breached"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DAILY REVIEW TAB
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_review:
+    from datetime import date as _date
+    import pytz
+
+    st.markdown("## Daily Strategy Review")
+    st.caption(
+        "Claude reviews every trade, evaluates your strategy performance, "
+        "and gives specific adjustments for tomorrow. "
+        "Best run after market close (4 PM ET)."
+    )
+
+    # ── Market close countdown ─────────────────────────────────────────────
+    try:
+        et_now    = datetime.now(pytz.timezone("US/Eastern"))
+        close_dt  = et_now.replace(hour=16, minute=0, second=0, microsecond=0)
+        if et_now >= close_dt:
+            st.success("Market is closed — great time to run your review.", icon="🔔")
+        else:
+            mins_left = int((close_dt - et_now).total_seconds() / 60)
+            st.info(f"Market closes in ~{mins_left} min (4 PM ET).", icon="🕓")
+    except Exception:
+        pass  # pytz optional
+
+    st.divider()
+
+    # ── Run review ─────────────────────────────────────────────────────────
+    rv_c1, rv_c2 = st.columns([2, 1])
+    run_review_btn = rv_c1.button(
+        "Run Today's Review",
+        type="primary",
+        use_container_width=True,
+        key="run_review_btn",
+    )
+    rv_c2.caption("Saves to daily_reviews/YYYY-MM-DD.md")
+
+    if run_review_btn:
+        if not _api_key():
+            st.error("Set ANTHROPIC_API_KEY in .env first.")
+        else:
+            st.info("Claude is reviewing your trading day…", icon="🧠")
+            review_ph  = st.empty()
+            full_review = []
+
+            with st.spinner(""):
+                for chunk in stream_review(
+                    api_key=_api_key(),
+                    pt=st.session_state["paper_trader"],
+                ):
+                    full_review.append(chunk)
+                    review_ph.markdown("".join(full_review))
+
+            # Save
+            today_str = _date.today().isoformat()
+            from pathlib import Path as _Path
+            reviews_dir = _Path("daily_reviews")
+            reviews_dir.mkdir(exist_ok=True)
+            out_path = reviews_dir / f"{today_str}.md"
+            with open(out_path, "w") as f:
+                f.write(f"# TradeAgent Daily Review — {today_str}\n\n")
+                f.write(f"_Generated at {datetime.now().strftime('%H:%M:%S')}_\n\n---\n\n")
+                f.write("".join(full_review))
+
+            st.session_state["last_review"] = "".join(full_review)
+            st.success(f"Saved to {out_path}", icon="💾")
+
+    elif st.session_state.get("last_review"):
+        st.markdown(st.session_state["last_review"])
+
+    st.divider()
+
+    # ── Past reviews ───────────────────────────────────────────────────────
+    past = list_past_reviews()
+    if past:
+        st.subheader("Past Reviews")
+        selected = st.selectbox(
+            "Load a past review",
+            options=[p.name for p in past],
+            key="review_select",
+        )
+        if selected:
+            review_path = next((p for p in past if p.name == selected), None)
+            if review_path:
+                content = review_path.read_text()
+                st.markdown(content)
+                st.download_button(
+                    "Download",
+                    data=content.encode(),
+                    file_name=selected,
+                    mime="text/markdown",
+                    key="review_dl",
+                )
+    else:
+        st.info("No past reviews yet. Run your first review above.", icon="📋")
