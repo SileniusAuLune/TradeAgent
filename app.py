@@ -29,6 +29,8 @@ from technical import calculate_indicators
 from fundamental import fetch_stock_fundamentals, fetch_market_context
 from agent import TradingAgent, build_context
 from paper_trader import PaperTrader
+from scanner import run_scan, build_scan_prompt, UNIVERSES, UNIVERSE_MOMENTUM
+from trade_loop import AgentLoop
 
 # ── Custom CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -77,6 +79,9 @@ def _init_state():
         "paper_trader"    : PaperTrader(),
         "trade_msg"       : None,
         "active_tab"      : "Analysis",
+        "agent_loop"      : None,
+        "scan_results"    : [],
+        "scan_claude_output": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -174,7 +179,9 @@ with st.sidebar:
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_analysis, tab_portfolio, tab_history = st.tabs(["Analysis", "Portfolio", "Trade History"])
+tab_analysis, tab_portfolio, tab_history, tab_scanner, tab_loop = st.tabs(
+    ["Analysis", "Portfolio", "Trade History", "Scanner 🔍", "Agent Loop 🤖"]
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -506,3 +513,351 @@ with tab_history:
                 file_name=f"paper_trades_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv",
             )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SCANNER TAB
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_scanner:
+    st.markdown("## Market Scanner")
+    st.caption(
+        "Scans multiple tickers simultaneously, scores each on momentum/volume/trend, "
+        "then asks Claude to rank the best opportunities and suggest entries."
+    )
+
+    # ── Config row ─────────────────────────────────────────────────────────
+    sc1, sc2, sc3, sc4 = st.columns([2, 1, 1, 1])
+    universe_name = sc1.selectbox(
+        "Universe",
+        options=list(UNIVERSES.keys()),
+        key="scan_universe",
+    )
+    top_n      = sc2.slider("Show top N", 3, 15, 8, key="scan_top_n")
+    ask_claude = sc3.checkbox("Claude ranking", value=True, key="scan_claude")
+    scan_btn   = sc4.button("Run Scan", type="primary", use_container_width=True, key="scan_run")
+
+    # Custom tickers
+    custom_raw = st.text_input(
+        "Custom tickers (overrides universe)",
+        placeholder="e.g. AAPL NVDA TSLA AMD PLTR",
+        key="scan_custom",
+    )
+
+    if scan_btn:
+        if not _api_key() and ask_claude:
+            st.error("Set ANTHROPIC_API_KEY in .env to get Claude's ranking.")
+        else:
+            symbols = (
+                [s.upper() for s in custom_raw.split() if s.strip()]
+                if custom_raw.strip()
+                else UNIVERSES[universe_name]
+            )
+
+            scan_status = st.empty()
+            scan_status.info(f"Scanning {len(symbols)} tickers in parallel…", icon="🔍")
+
+            with st.spinner(""):
+                results = run_scan(symbols, max_workers=10, top_n=top_n)
+
+            scan_status.empty()
+
+            # ── Scored results table ────────────────────────────────────────
+            st.subheader(f"Top {len(results)} Setups by Score")
+
+            SIGNAL_COLORS = {
+                "STRONG BUY": "#00d4aa",
+                "BUY"       : "#4caf50",
+                "WATCH"     : "#ffd93d",
+                "NEUTRAL"   : "#aaa",
+                "AVOID"     : "#ff6b6b",
+            }
+
+            for i, r in enumerate(results):
+                if r.error:
+                    continue
+                sig_color = SIGNAL_COLORS.get(r.signal, "#aaa")
+                bar_w     = max(4, int(r.score))
+                day_color = "#00d4aa" if r.pct_change >= 0 else "#ff6b6b"
+                reasons_str = " · ".join(r.reasons) if r.reasons else "—"
+
+                with st.container():
+                    rc1, rc2, rc3, rc4, rc5 = st.columns([1, 2, 2, 2, 4])
+                    rc1.markdown(f"**#{i+1}**")
+                    rc2.markdown(
+                        f"**{r.symbol}**  \n"
+                        f'<span style="color:{sig_color};font-weight:bold">{r.signal}</span>',
+                        unsafe_allow_html=True,
+                    )
+                    rc3.markdown(
+                        f"${r.price:,.2f}  "
+                        f'<span style="color:{day_color}">{r.pct_change:+.1f}%</span>',
+                        unsafe_allow_html=True,
+                    )
+                    rc4.markdown(
+                        f"Score: **{r.score:.0f}**  \n"
+                        f"RSI {r.rsi:.0f} · Vol {r.volume_ratio:.1f}x · ADX {r.adx:.0f}"
+                    )
+                    rc5.markdown(f"_{reasons_str}_")
+                st.divider()
+
+            # Store results for Claude
+            st.session_state["scan_results"] = results
+
+            # ── Claude ranking ──────────────────────────────────────────────
+            if ask_claude and _api_key():
+                st.subheader("Claude's Ranked Opportunities")
+                st.caption("Adaptive thinking — specific entries, stops, and targets for each")
+
+                valid = [r for r in results if not r.error]
+                prompt = build_scan_prompt(valid)
+
+                agent    = TradingAgent(api_key=_api_key())
+                claude_ph = st.empty()
+                full_text = []
+
+                with st.spinner(""):
+                    for chunk in agent.stream_analysis(prompt, asset_type="scan"):
+                        full_text.append(chunk)
+                        claude_ph.markdown("".join(full_text))
+
+                st.session_state["scan_claude_output"] = "".join(full_text)
+
+                # ── Quick paper trade from scanner ──────────────────────────
+                st.divider()
+                st.subheader("Paper Trade a Scanner Pick")
+                qc1, qc2, qc3, qc4 = st.columns([2, 1, 2, 1])
+                q_sym    = qc1.selectbox(
+                    "Symbol",
+                    options=[r.symbol for r in valid],
+                    key="scan_trade_sym",
+                )
+                q_shares = qc2.number_input("Shares", min_value=1, value=10, key="scan_trade_shares")
+                q_price  = qc3.number_input(
+                    "Price ($)",
+                    min_value=0.01,
+                    value=float(next((r.price for r in valid if r.symbol == q_sym), 100)),
+                    format="%.2f",
+                    key="scan_trade_price",
+                )
+                q_buy = qc4.button("Buy (Paper)", type="primary", key="scan_buy_btn")
+
+                if q_buy:
+                    try:
+                        t = st.session_state["paper_trader"].buy(
+                            q_sym, float(q_shares), q_price,
+                            signal="BUY",
+                            note=f"Scanner pick — {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                        )
+                        st.success(
+                            f"Bought {q_shares}× {q_sym} @ ${q_price:.2f}  "
+                            f"(cost: ${t['amount']:,.2f})",
+                            icon="✅",
+                        )
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+
+    elif st.session_state.get("scan_claude_output"):
+        # Show previous scan if not re-running
+        st.subheader("Last Scan — Claude's Ranking")
+        st.markdown(st.session_state["scan_claude_output"])
+    else:
+        st.info(
+            "Configure your scan above and click **Run Scan**.  \n"
+            "Claude will analyse all tickers in parallel and rank the best "
+            "short-term opportunities with specific price levels.",
+            icon="🔍",
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AGENT LOOP TAB
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_loop:
+    st.markdown("## Autonomous Agent Loop")
+    st.caption(
+        "Claude scans the market on a schedule and executes paper trades automatically. "
+        "The loop pauses itself if your loss limits are breached."
+    )
+
+    loop: AgentLoop = st.session_state.get("agent_loop")
+
+    # ── Status banner ──────────────────────────────────────────────────────
+    if loop and loop.is_running:
+        status = loop.status
+        if "PAUSED" in status:
+            st.error(f"⛔ {status}", icon="⛔")
+            if st.button("Resume Loop", key="loop_resume"):
+                loop.resume()
+                st.rerun()
+        else:
+            st.success(f"Running — {status}", icon="🟢")
+    elif loop and not loop.is_running:
+        st.warning("Loop stopped.", icon="🟡")
+    else:
+        st.info("Loop is not running. Configure below and click Start.", icon="ℹ️")
+
+    st.divider()
+
+    # ── Configuration ──────────────────────────────────────────────────────
+    with st.expander("Configure Loop", expanded=(loop is None)):
+        cfg_c1, cfg_c2 = st.columns(2)
+
+        cfg_interval    = cfg_c1.slider("Scan interval (seconds)", 60, 1800, 300, step=60, key="cfg_interval")
+        cfg_min_score   = cfg_c1.slider("Min scanner score to trade", 20, 80, 45, key="cfg_min_score")
+        cfg_max_pos     = cfg_c1.slider("Max open positions",         1, 15,  5,  key="cfg_max_pos")
+        cfg_size_pct    = cfg_c1.slider("Max % equity per trade",     2, 20,  8,  key="cfg_size_pct")
+
+        cfg_stop        = cfg_c2.slider("Stop-loss (%)",              1, 15,  3,  key="cfg_stop")
+        cfg_target      = cfg_c2.slider("Take-profit (%)",            2, 30,  8,  key="cfg_target")
+        cfg_max_dd      = cfg_c2.slider(
+            "Pause if drawdown exceeds (%)",
+            1, 50, 10, key="cfg_max_dd",
+            help="Loop pauses and alerts if total equity drops this % from starting balance",
+        )
+        cfg_max_loss    = cfg_c2.number_input(
+            "Pause if realised losses exceed ($)  [0 = off]",
+            min_value=0.0, value=500.0, step=50.0, format="%.0f", key="cfg_max_loss",
+        )
+
+        cfg_universe    = st.selectbox("Scan universe", list(UNIVERSES.keys()), key="cfg_universe")
+        cfg_custom_syms = st.text_input(
+            "Custom symbols (overrides universe)",
+            placeholder="AAPL NVDA TSLA",
+            key="cfg_custom_syms",
+        )
+
+        st.markdown("---")
+        st.markdown(
+            "**Loss limits:**  \n"
+            f"- Drawdown limit: loop pauses when equity falls ≥ **{cfg_max_dd}%** from start  \n"
+            f"- Loss cap: loop pauses when realised losses hit **${cfg_max_loss:,.0f}**  \n"
+            "- Individual stop-loss per trade: **{cfg_stop}%**  \n"
+            "- Individual take-profit per trade: **{cfg_target}%**"
+        )
+
+    # ── Start / Stop ───────────────────────────────────────────────────────
+    btn_c1, btn_c2, btn_c3 = st.columns(3)
+
+    start_btn = btn_c1.button(
+        "Start Loop (Paper)",
+        type="primary",
+        disabled=(loop is not None and loop.is_running),
+        use_container_width=True,
+        key="loop_start",
+    )
+    stop_btn  = btn_c2.button(
+        "Stop Loop",
+        disabled=(loop is None or not loop.is_running),
+        use_container_width=True,
+        key="loop_stop",
+    )
+    refresh_btn = btn_c3.button("Refresh", use_container_width=True, key="loop_refresh")
+
+    if start_btn:
+        if not _api_key():
+            st.error("Set ANTHROPIC_API_KEY in .env first.")
+        else:
+            symbols = (
+                [s.upper() for s in cfg_custom_syms.split() if s.strip()]
+                if cfg_custom_syms.strip()
+                else UNIVERSES[cfg_universe]
+            )
+            new_loop = AgentLoop(
+                api_key             = _api_key(),
+                paper_trader        = st.session_state["paper_trader"],
+                symbols             = symbols,
+                interval            = cfg_interval,
+                min_score_threshold = cfg_min_score,
+                max_open_positions  = cfg_max_pos,
+                max_position_pct    = cfg_size_pct,
+                stop_loss_pct       = cfg_stop,
+                take_profit_pct     = cfg_target,
+                max_drawdown_pct    = cfg_max_dd,
+                max_loss_usd        = cfg_max_loss,
+                live_mode           = False,
+            )
+            new_loop.start()
+            st.session_state["agent_loop"] = new_loop
+            st.success("Agent loop started!", icon="🤖")
+            st.rerun()
+
+    if stop_btn and loop:
+        loop.stop()
+        st.warning("Loop stopping after current cycle…", icon="🛑")
+        st.rerun()
+
+    if refresh_btn:
+        st.rerun()
+
+    st.divider()
+
+    # ── Live event feed ────────────────────────────────────────────────────
+    if loop:
+        st.subheader("Event Feed")
+        events = loop.get_recent_events(30)
+        if events:
+            for evt in events:
+                ts        = evt.get("ts", "")
+                evt_type  = evt.get("type", "")
+
+                if evt_type == "trade":
+                    action = evt.get("action", "")
+                    sym    = evt.get("symbol", "")
+                    price  = evt.get("price", 0)
+                    icon   = "🟢" if action == "BUY" else "🔴"
+                    pnl_str = f"  P&L: ${evt['realised_pnl']:+,.2f}" if "realised_pnl" in evt else ""
+                    st.markdown(
+                        f"`{ts}` {icon} **{action} {sym}** @ ${price:,.2f}{pnl_str}  \n"
+                        f"_{evt.get('rationale', '')[:100]}_"
+                    )
+
+                elif evt_type == "scan":
+                    st.markdown(
+                        f"`{ts}` 🔍 Scan — {evt.get('scanned',0)} tickers, "
+                        f"{evt.get('above_threshold',0)} above threshold"
+                    )
+
+                elif evt_type == "paused":
+                    st.markdown(f"`{ts}` ⛔ **PAUSED** — {evt.get('reason','')}")
+
+                elif evt_type == "resumed":
+                    st.markdown(f"`{ts}` ▶️ **Resumed** by user")
+
+                elif evt_type == "exit":
+                    sym    = evt.get("symbol", "")
+                    reason = evt.get("reason", "")
+                    pnl    = evt.get("pnl", 0)
+                    color  = "🟢" if pnl >= 0 else "🔴"
+                    st.markdown(f"`{ts}` {color} **EXIT {sym}** — {reason}  P&L: ${pnl:+,.2f}")
+
+                elif evt_type == "error":
+                    st.markdown(f"`{ts}` ⚠️ Error — {evt.get('message','')}")
+
+                else:
+                    st.markdown(f"`{ts}` {evt_type}")
+        else:
+            st.caption("No events yet — waiting for first cycle…")
+
+        st.divider()
+
+        # ── Cycle timing countdown ─────────────────────────────────────────
+        if loop.is_running and loop._last_cycle:
+            st.caption(
+                f"Cycle {loop._cycle_count} complete.  "
+                f"Next scan in ~{loop.interval}s.  "
+                f"Auto-refresh this page to see updates."
+            )
+
+    st.markdown("---")
+    st.markdown(
+        "**How it works:**  \n"
+        "1. Every N seconds Claude scans all tickers in your universe  \n"
+        "2. Scores each on momentum, trend, volume, and ADX  \n"
+        "3. Asks Claude: *given my portfolio and these setups, what should I trade?*  \n"
+        "4. Executes BUY/SELL decisions on your paper account automatically  \n"
+        "5. Monitors all open positions for stop-loss and take-profit hits  \n"
+        "6. **Pauses immediately** if your drawdown or loss cap is breached"
+    )
