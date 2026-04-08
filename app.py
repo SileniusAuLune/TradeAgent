@@ -84,7 +84,9 @@ def _init_state():
         "agent_loop"        : None,
         "scan_results"      : [],
         "scan_claude_output": "",
-        "live_mode"         : False,
+        "last_review"                : "",
+        "pending_strategy_updates"   : None,
+        "live_mode"                  : False,
         "schwab_client"     : None,
         "schwab_status"     : "disconnected",   # disconnected | connecting | connected | error
         "schwab_error"      : "",
@@ -344,7 +346,9 @@ with tab_analysis:
             })
 
             # ── Run Claude analysis ─────────────────────────────────────────
-            agent   = TradingAgent(api_key=_api_key())
+            from strategy import get_strategy as _gs
+            agent   = TradingAgent(api_key=_api_key(),
+                                   strategy_additions=_gs().prompt_additions())
             context = build_context(md, indicators, fundamentals, market_ctx)
 
             st.info("Claude claude-opus-4-6 is thinking…", icon="🧠")
@@ -1021,36 +1025,37 @@ with tab_loop:
 
 with tab_review:
     from datetime import date as _date
+    from strategy import get_strategy as _get_strategy
+    from daily_review import extract_strategy_updates as _extract_updates
     import pytz
+
+    _sm = _get_strategy()
 
     st.markdown("## Daily Strategy Review")
     st.caption(
-        "Claude reviews every trade, evaluates your strategy performance, "
-        "and gives specific adjustments for tomorrow. "
-        "Best run after market close (4 PM ET)."
+        "Claude reviews your trades, then proposes specific parameter changes. "
+        "You approve before anything is applied. Best run after market close (4 PM ET)."
     )
 
     # ── Market close countdown ─────────────────────────────────────────────
     try:
-        et_now    = datetime.now(pytz.timezone("US/Eastern"))
-        close_dt  = et_now.replace(hour=16, minute=0, second=0, microsecond=0)
+        et_now   = datetime.now(pytz.timezone("US/Eastern"))
+        close_dt = et_now.replace(hour=16, minute=0, second=0, microsecond=0)
         if et_now >= close_dt:
             st.success("Market is closed — great time to run your review.", icon="🔔")
         else:
             mins_left = int((close_dt - et_now).total_seconds() / 60)
             st.info(f"Market closes in ~{mins_left} min (4 PM ET).", icon="🕓")
     except Exception:
-        pass  # pytz optional
+        pass
 
     st.divider()
 
-    # ── Run review ─────────────────────────────────────────────────────────
+    # ── Step 1: Run review ─────────────────────────────────────────────────
+    st.subheader("Step 1 — Run Today's Review")
     rv_c1, rv_c2 = st.columns([2, 1])
     run_review_btn = rv_c1.button(
-        "Run Today's Review",
-        type="primary",
-        use_container_width=True,
-        key="run_review_btn",
+        "Run Review", type="primary", use_container_width=True, key="run_review_btn"
     )
     rv_c2.caption("Saves to daily_reviews/YYYY-MM-DD.md")
 
@@ -1059,19 +1064,15 @@ with tab_review:
             st.error("Set ANTHROPIC_API_KEY in .env first.")
         else:
             st.info("Claude is reviewing your trading day…", icon="🧠")
-            review_ph  = st.empty()
+            review_ph   = st.empty()
             full_review = []
-
             with st.spinner(""):
-                for chunk in stream_review(
-                    api_key=_api_key(),
-                    pt=st.session_state["paper_trader"],
-                ):
+                for chunk in stream_review(api_key=_api_key(),
+                                           pt=st.session_state["paper_trader"]):
                     full_review.append(chunk)
                     review_ph.markdown("".join(full_review))
 
-            # Save
-            today_str = _date.today().isoformat()
+            today_str   = _date.today().isoformat()
             from pathlib import Path as _Path
             reviews_dir = _Path("daily_reviews")
             reviews_dir.mkdir(exist_ok=True)
@@ -1081,11 +1082,149 @@ with tab_review:
                 f.write(f"_Generated at {datetime.now().strftime('%H:%M:%S')}_\n\n---\n\n")
                 f.write("".join(full_review))
 
-            st.session_state["last_review"] = "".join(full_review)
+            st.session_state["last_review"]          = "".join(full_review)
+            st.session_state["pending_strategy_updates"] = None  # reset
             st.success(f"Saved to {out_path}", icon="💾")
 
     elif st.session_state.get("last_review"):
-        st.markdown(st.session_state["last_review"])
+        st.markdown(st.session_state.get("last_review", ""))
+
+    st.divider()
+
+    # ── Step 2: Extract proposed changes ──────────────────────────────────
+    st.subheader("Step 2 — Propose Strategy Changes")
+    st.caption(
+        "Claude reads the review and suggests specific parameter changes. "
+        "Nothing is saved until you approve in Step 3."
+    )
+
+    propose_btn = st.button(
+        "Propose Updates from Review",
+        disabled=not bool(st.session_state.get("last_review")),
+        key="propose_btn",
+    )
+
+    if propose_btn:
+        with st.spinner("Extracting strategy changes…"):
+            proposed = _extract_updates(
+                review_text      = st.session_state["last_review"],
+                api_key          = _api_key(),
+                current_strategy = _sm.data,
+            )
+        st.session_state["pending_strategy_updates"] = proposed
+        st.rerun()
+
+    pending = st.session_state.get("pending_strategy_updates")
+
+    if pending:
+        st.markdown("#### Proposed Changes")
+        st.info(pending.get("human_summary", ""), icon="💡")
+        st.caption(f"_Rationale: {pending.get('rationale', '')}_")
+
+        # Show a clean diff table
+        diff_rows = []
+        LABELS = {
+            "min_score_threshold" : "Min score threshold",
+            "stop_loss_pct"       : "Stop-loss %",
+            "take_profit_pct"     : "Take-profit %",
+            "max_position_pct"    : "Max position %",
+            "max_open_positions"  : "Max open positions",
+            "avoid_symbols"       : "Avoid symbols",
+            "preferred_symbols"   : "Preferred symbols",
+            "prompt_additions"    : "Strategy prompt notes",
+        }
+        current = _sm.data
+        for key, label in LABELS.items():
+            if key in pending and pending[key] is not None:
+                old_val = current.get(key, "—")
+                new_val = pending[key]
+                if old_val != new_val:
+                    diff_rows.append({
+                        "Parameter" : label,
+                        "Current"   : str(old_val),
+                        "Proposed"  : str(new_val),
+                    })
+
+        if "scanner_weights" in pending and pending["scanner_weights"]:
+            for wk, wv in pending["scanner_weights"].items():
+                old_w = current.get("scanner_weights", {}).get(wk, 1.0)
+                if wv != old_w:
+                    diff_rows.append({
+                        "Parameter": f"Scanner weight: {wk}",
+                        "Current"  : str(old_w),
+                        "Proposed" : str(wv),
+                    })
+
+        if diff_rows:
+            import pandas as pd
+            st.dataframe(
+                pd.DataFrame(diff_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.success("No parameter changes proposed — current strategy looks good!", icon="✅")
+
+        st.divider()
+
+        # ── Step 3: Approve or Reject ──────────────────────────────────────
+        st.subheader("Step 3 — Your Decision")
+        ap_c1, ap_c2 = st.columns(2)
+        approve_btn = ap_c1.button(
+            "✅ Apply These Changes",
+            type="primary",
+            use_container_width=True,
+            key="approve_strategy_btn",
+        )
+        reject_btn = ap_c2.button(
+            "❌ Reject — Keep Current Strategy",
+            use_container_width=True,
+            key="reject_strategy_btn",
+        )
+
+        if approve_btn:
+            changed = _sm.apply_updates(pending, source="daily_review")
+            if changed:
+                st.success(
+                    f"Strategy updated! {len(changed)} parameter(s) changed. "
+                    "The agent loop and scanner will use the new settings on the next cycle.",
+                    icon="✅",
+                )
+                for k, v in changed.items():
+                    st.markdown(f"- **{k}**: {v['from']} → **{v['to']}**")
+            else:
+                st.info("No changes were different from current settings.")
+            st.session_state["pending_strategy_updates"] = None
+            st.rerun()
+
+        if reject_btn:
+            st.session_state["pending_strategy_updates"] = None
+            st.warning("Changes rejected. Strategy unchanged.", icon="🚫")
+            st.rerun()
+
+    st.divider()
+
+    # ── Current strategy ───────────────────────────────────────────────────
+    with st.expander("Current Strategy Settings", expanded=False):
+        for line in _sm.summary_lines():
+            st.markdown(line)
+
+        st.divider()
+        hist = _sm.history_lines(10)
+        if hist:
+            st.markdown("**Recent Updates**")
+            for entry in hist:
+                st.markdown(
+                    f"`{entry['date']} {entry['time']}` "
+                    f"[{entry['source']}] "
+                    f"{entry.get('rationale', '')}  \n"
+                    + "  ".join(f"**{k}**: {v['from']} → {v['to']}"
+                                for k, v in entry.get("changes", {}).items())
+                )
+        if st.button("Reset to Defaults", key="strategy_reset"):
+            _sm.reset_to_defaults()
+            st.success("Strategy reset to defaults.", icon="🔄")
+            st.rerun()
 
     st.divider()
 

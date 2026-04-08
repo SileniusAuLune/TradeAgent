@@ -36,6 +36,7 @@ import anthropic
 from scanner import run_scan, build_scan_prompt, UNIVERSE_MOMENTUM
 from paper_trader import PaperTrader
 from market_data import fetch_market_data
+from strategy import get_strategy
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 log = logging.getLogger("trade_loop")
@@ -223,7 +224,15 @@ class AgentLoop:
         self._check_exits()
 
         # ── 2. Scan for opportunities ──────────────────────────────────────
-        scan_results = run_scan(self.symbols, max_workers=10, top_n=self.top_n_scan)
+        sm           = get_strategy()
+        scan_results = run_scan(
+            self.symbols,
+            max_workers      = 10,
+            top_n            = self.top_n_scan,
+            weights          = sm.scanner_weights(),
+            avoid_symbols    = sm.get("avoid_symbols", []),
+            preferred_symbols= sm.get("preferred_symbols", []),
+        )
         strong = [r for r in scan_results if r.score >= self.min_score_threshold and not r.error]
         self._log_event("scan", {
             "cycle"      : self._cycle_count,
@@ -450,7 +459,7 @@ class AgentLoop:
 
     @staticmethod
     def _system_prompt() -> str:
-        return (
+        base = (
             "You are an autonomous short-term momentum trader with a strict risk "
             "management framework. Your job is to make fast, decisive trade decisions.\n\n"
             "For each ticker in the scan results, output ONE decision line:\n"
@@ -466,6 +475,10 @@ class AgentLoop:
             "- When in doubt, HOLD (no trade is better than a bad trade)\n"
             "- Be concise — one line per ticker, no extra commentary"
         )
+        additions = get_strategy().prompt_additions()
+        if additions:
+            base += f"\n\nStrategy rules from recent review:\n{additions}"
+        return base
 
     def _build_agent_prompt(
         self,

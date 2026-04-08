@@ -27,6 +27,7 @@ import anthropic
 from dotenv import load_dotenv
 
 from paper_trader import PaperTrader
+from strategy import StrategyManager, DEFAULT_STRATEGY
 
 load_dotenv()
 
@@ -245,6 +246,103 @@ def stream_review(api_key: str, pt: Optional[PaperTrader] = None):
     ) as stream:
         for text in stream.text_stream:
             yield text
+
+
+def extract_strategy_updates(
+    review_text : str,
+    api_key     : str,
+    current_strategy: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Second Claude call: reads the review and produces a structured JSON
+    of proposed strategy parameter changes.
+
+    Returns a dict with keys matching StrategyManager.apply_updates(),
+    plus a "rationale" string and a "human_summary" for display.
+    The user must explicitly approve before anything is saved.
+    """
+    sm      = current_strategy or DEFAULT_STRATEGY
+    weights = sm.get("scanner_weights", DEFAULT_STRATEGY["scanner_weights"])
+
+    system = """You are a trading system configurator. Given a post-market strategy
+review, extract specific parameter changes to improve performance.
+
+Output ONLY a valid JSON object with these fields (omit any field you would not change):
+{
+  "min_score_threshold"  : <number 20-80 | null>,
+  "stop_loss_pct"        : <number 1-15  | null>,
+  "take_profit_pct"      : <number 2-30  | null>,
+  "max_position_pct"     : <number 2-20  | null>,
+  "max_open_positions"   : <integer 1-15 | null>,
+  "scanner_weights": {
+    "trend"            : <0.5-2.0 | null>,
+    "adx"              : <0.5-2.0 | null>,
+    "rsi"              : <0.5-2.0 | null>,
+    "macd"             : <0.5-2.0 | null>,
+    "volume"           : <0.5-2.0 | null>,
+    "bb_squeeze"       : <0.5-2.0 | null>,
+    "market_structure" : <0.5-2.0 | null>,
+    "weekly_trend"     : <0.5-2.0 | null>
+  },
+  "avoid_symbols"    : [<list of tickers to avoid | null>],
+  "preferred_symbols": [<list of tickers to watch | null>],
+  "prompt_additions" : "<1-2 sentence strategy rule to add to the agent prompt | null>",
+  "rationale"        : "<1 sentence explaining the key changes>",
+  "human_summary"    : "<2-3 bullet points the trader can quickly read to decide whether to approve>"
+}
+
+Only suggest changes that are directly supported by the review's findings.
+Do not change parameters that are working well.
+Keep changes conservative — one bad day should not cause radical swings."""
+
+    prompt = (
+        f"Current strategy settings:\n"
+        f"- min_score_threshold: {sm.get('min_score_threshold', 45)}\n"
+        f"- stop_loss_pct: {sm.get('stop_loss_pct', 3.0)}\n"
+        f"- take_profit_pct: {sm.get('take_profit_pct', 8.0)}\n"
+        f"- max_position_pct: {sm.get('max_position_pct', 8.0)}\n"
+        f"- max_open_positions: {sm.get('max_open_positions', 5)}\n"
+        f"- scanner_weights: {weights}\n"
+        f"- prompt_additions: {sm.get('prompt_additions', 'none')}\n\n"
+        f"Daily review:\n\n{review_text}\n\n"
+        "Output the JSON update object now."
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    resp   = client.messages.create(
+        model      = "claude-opus-4-6",
+        max_tokens = 1024,
+        system     = system,
+        messages   = [{"role": "user", "content": prompt}],
+    )
+    raw = "".join(b.text for b in resp.content if hasattr(b, "text")).strip()
+
+    # Strip markdown code fences if present
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+
+    try:
+        updates = json.loads(raw)
+    except json.JSONDecodeError:
+        # Fallback: return empty (no changes proposed)
+        updates = {
+            "rationale"    : "Could not parse strategy updates from review.",
+            "human_summary": "No changes proposed — review the report manually.",
+        }
+
+    # Clean out null scanner weight entries
+    if "scanner_weights" in updates and isinstance(updates["scanner_weights"], dict):
+        updates["scanner_weights"] = {
+            k: v for k, v in updates["scanner_weights"].items()
+            if v is not None
+        }
+        if not updates["scanner_weights"]:
+            del updates["scanner_weights"]
+
+    return updates
 
 
 def list_past_reviews() -> List[Path]:

@@ -310,9 +310,13 @@ class TradingAgent:
     and generate actionable trading recommendations, streamed to stdout.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, strategy_additions: str = ""):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model  = "claude-opus-4-6"
+        # Append any strategy notes from the daily review feedback loop
+        self._system = SYSTEM_PROMPT
+        if strategy_additions and strategy_additions.strip():
+            self._system = SYSTEM_PROMPT + f"\n\nAdditional strategy rules from recent review:\n{strategy_additions.strip()}"
 
     def analyze(
         self,
@@ -338,7 +342,7 @@ class TradingAgent:
             model=self.model,
             max_tokens=4096,
             thinking={"type": "adaptive"},
-            system=SYSTEM_PROMPT,
+            system=self._system,
             messages=[{"role": "user", "content": user_message}],
         ) as stream:
             for text in stream.text_stream:
@@ -362,7 +366,7 @@ class TradingAgent:
             model=self.model,
             max_tokens=4096,
             thinking={"type": "adaptive"},
-            system=SYSTEM_PROMPT,
+            system=self._system,
             messages=[{"role": "user", "content": user_message}],
         ) as stream:
             for text in stream.text_stream:

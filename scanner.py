@@ -60,6 +60,9 @@ class ScanResult:
     error         : Optional[str] = None
 
 
+_current_weights: Dict[str, float] = {}   # set by run_scan from strategy
+
+
 def _scan_one(symbol: str) -> ScanResult:
     """Fetch and score a single ticker. Safe — never raises."""
     try:
@@ -81,7 +84,7 @@ def _scan_one(symbol: str) -> ScanResult:
             market_structure= ind.get("market_structure", "N/A"),
         )
 
-        result.score, result.signal, result.reasons = _score(result, ind)
+        result.score, result.signal, result.reasons = _score(result, ind, _current_weights)
         return result
 
     except Exception as exc:
@@ -93,19 +96,23 @@ def _scan_one(symbol: str) -> ScanResult:
         )
 
 
-def _score(r: ScanResult, ind: Dict[str, Any]):
+def _score(r: ScanResult, ind: Dict[str, Any], weights: Optional[Dict[str, float]] = None):
     """
     Score a ticker from 0–100 for short-term trading opportunity.
+    weights: multipliers per signal category from StrategyManager.
     Higher = stronger setup. Returns (score, signal_label, reasons).
     """
+    w = weights or {}
+    wt  = lambda k: w.get(k, 1.0)   # weight for key k, default 1.0
+
     score   = 0.0
     reasons = []
 
     # ── Trend alignment (0–25 pts) ─────────────────────────────────────────
     if "Strong Up" in r.trend:
-        score += 25; reasons.append("Strong uptrend")
+        score += 25 * wt("trend"); reasons.append("Strong uptrend")
     elif "Up" in r.trend:
-        score += 15; reasons.append("Uptrend")
+        score += 15 * wt("trend"); reasons.append("Uptrend")
     elif "Strong Down" in r.trend:
         score -= 10; reasons.append("Strong downtrend (short candidate)")
     elif "Down" in r.trend:
@@ -113,41 +120,41 @@ def _score(r: ScanResult, ind: Dict[str, Any]):
 
     # ── ADX strength (0–15 pts) ────────────────────────────────────────────
     if r.adx >= 30:
-        score += 15; reasons.append(f"ADX {r.adx:.0f} — strong trend")
+        score += 15 * wt("adx"); reasons.append(f"ADX {r.adx:.0f} — strong trend")
     elif r.adx >= 20:
-        score += 8;  reasons.append(f"ADX {r.adx:.0f} — trending")
+        score += 8  * wt("adx"); reasons.append(f"ADX {r.adx:.0f} — trending")
 
     # ── RSI momentum zone (0–15 pts) ──────────────────────────────────────
     if 55 <= r.rsi <= 70:
-        score += 15; reasons.append(f"RSI {r.rsi:.0f} — bullish momentum zone")
+        score += 15 * wt("rsi"); reasons.append(f"RSI {r.rsi:.0f} — bullish momentum zone")
     elif 50 <= r.rsi < 55:
-        score += 8
+        score += 8  * wt("rsi")
     elif r.rsi > 70:
-        score += 5;  reasons.append(f"RSI {r.rsi:.0f} — overbought (momentum)")
+        score += 5  * wt("rsi"); reasons.append(f"RSI {r.rsi:.0f} — overbought (momentum)")
     elif r.rsi < 30:
-        score += 10; reasons.append(f"RSI {r.rsi:.0f} — oversold bounce candidate")
+        score += 10 * wt("rsi"); reasons.append(f"RSI {r.rsi:.0f} — oversold bounce candidate")
     elif r.rsi < 40:
-        score += 5
+        score += 5  * wt("rsi")
 
     # ── MACD (0–10 pts) ───────────────────────────────────────────────────
     if r.macd_bullish:
-        score += 10; reasons.append("MACD bullish")
+        score += 10 * wt("macd"); reasons.append("MACD bullish")
     if ind.get("macd_crossover"):
-        score += 5;  reasons.append("MACD crossover — fresh signal")
+        score += 5  * wt("macd"); reasons.append("MACD crossover — fresh signal")
 
     # ── Volume surge (0–15 pts) ───────────────────────────────────────────
     if r.volume_ratio >= 2.5:
-        score += 15; reasons.append(f"{r.volume_ratio:.1f}x avg volume — strong interest")
+        score += 15 * wt("volume"); reasons.append(f"{r.volume_ratio:.1f}x avg volume — strong interest")
     elif r.volume_ratio >= 1.5:
-        score += 8;  reasons.append(f"{r.volume_ratio:.1f}x avg volume")
+        score += 8  * wt("volume"); reasons.append(f"{r.volume_ratio:.1f}x avg volume")
 
     # ── BB squeeze breakout (0–10 pts) ────────────────────────────────────
     if r.bb_squeeze:
-        score += 10; reasons.append("Bollinger Band squeeze — breakout pending")
+        score += 10 * wt("bb_squeeze"); reasons.append("Bollinger Band squeeze — breakout pending")
 
     # ── Market structure (0–10 pts) ───────────────────────────────────────
     if r.market_structure == "Higher Highs / Higher Lows (Bullish)":
-        score += 10; reasons.append("HH/HL structure")
+        score += 10 * wt("market_structure"); reasons.append("HH/HL structure")
     elif r.market_structure == "Lower Highs / Lower Lows (Bearish)":
         score -= 5
 
@@ -159,7 +166,7 @@ def _score(r: ScanResult, ind: Dict[str, Any]):
 
     # ── Weekly higher-TF confirmation ─────────────────────────────────────
     if ind.get("weekly_trend") and "Up" in str(ind.get("weekly_trend", "")):
-        score += 5;  reasons.append("Weekly uptrend confirmation")
+        score += 5 * wt("weekly_trend");  reasons.append("Weekly uptrend confirmation")
 
     # ── Signal label ──────────────────────────────────────────────────────
     if score >= 60:
@@ -177,19 +184,37 @@ def _score(r: ScanResult, ind: Dict[str, Any]):
 
 
 def run_scan(
-    symbols: List[str],
-    max_workers: int = 8,
-    top_n: int = 10,
+    symbols       : List[str],
+    max_workers   : int = 8,
+    top_n         : int = 10,
+    weights       : Optional[Dict[str, float]] = None,
+    avoid_symbols : Optional[List[str]] = None,
+    preferred_symbols: Optional[List[str]] = None,
 ) -> List[ScanResult]:
     """
     Scan all symbols in parallel.
     Returns top_n results sorted by score (highest first).
+    weights/avoid_symbols/preferred_symbols come from StrategyManager.
     """
+    global _current_weights
+    _current_weights = weights or {}
+
+    avoid  = {s.upper() for s in (avoid_symbols or [])}
+    prefer = {s.upper() for s in (preferred_symbols or [])}
+
+    # Filter out avoided symbols
+    scan_list = [s for s in symbols if s.upper() not in avoid]
+
     results: List[ScanResult] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_scan_one, sym): sym for sym in symbols}
+        futures = {pool.submit(_scan_one, sym): sym for sym in scan_list}
         for fut in concurrent.futures.as_completed(futures):
-            results.append(fut.result())
+            r = fut.result()
+            # Boost preferred symbols by +10 score
+            if r.symbol in prefer and not r.error:
+                r.score = round(r.score + 10, 1)
+                r.reasons = [f"Preferred symbol"] + r.reasons[:3]
+            results.append(r)
 
     # Sort: errors last, then by score descending
     results.sort(key=lambda r: (r.error is not None, -r.score))
