@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    TradeAgent — Launch Script
+    TradeAgent - Launch Script
     Activates the virtual environment and starts the Streamlit dashboard.
 
 .DESCRIPTION
@@ -18,21 +18,14 @@ $REPO_DIR = $PSScriptRoot
 $VENV_DIR = Join-Path $REPO_DIR ".venv"
 $APP_FILE = Join-Path $REPO_DIR "app.py"
 
-# ── Banner ─────────────────────────────────────────────────────────────────────
 Clear-Host
 Write-Host ""
-Write-Host "  ______ " -ForegroundColor Cyan
-Write-Host " |__  __| " -ForegroundColor Cyan
-Write-Host "   | |_ __ __ _  __| | ___ " -ForegroundColor Cyan
-Write-Host "   | | '__/ _' |/ _' |/ _ \  " -ForegroundColor Cyan
-Write-Host "   | | | | (_| | (_| |  __/  Agent" -ForegroundColor Cyan
-Write-Host "   |_|_|  \__,_|\__,_|\___| " -ForegroundColor Cyan
-Write-Host ""
+Write-Host "  TradeAgent" -ForegroundColor Cyan
 Write-Host "  AI-Powered Trading Analysis" -ForegroundColor White
-Write-Host "  Powered by Claude claude-opus-4-6" -ForegroundColor Gray
+Write-Host "  Powered by Claude Opus 4" -ForegroundColor Gray
 Write-Host ""
 
-# ── Sanity checks ──────────────────────────────────────────────────────────────
+# Sanity checks
 if (-not (Test-Path $VENV_DIR)) {
     Write-Host "  Virtual environment not found." -ForegroundColor Red
     Write-Host "  Please run install_windows.ps1 first." -ForegroundColor Red
@@ -43,13 +36,13 @@ if (-not (Test-Path $VENV_DIR)) {
 
 if (-not (Test-Path $APP_FILE)) {
     Write-Host "  app.py not found in $REPO_DIR" -ForegroundColor Red
-    Write-Host "  Make sure you're running this from the TradeAgent folder." -ForegroundColor Red
+    Write-Host "  Make sure you are running this from the TradeAgent folder." -ForegroundColor Red
     Write-Host ""
     Read-Host "Press Enter to exit"
     exit 1
 }
 
-# ── Check .env and API key ─────────────────────────────────────────────────────
+# Check .env and API key
 $ENV_FILE = Join-Path $REPO_DIR ".env"
 if (-not (Test-Path $ENV_FILE)) {
     Write-Host "  WARNING: .env file not found." -ForegroundColor Yellow
@@ -64,7 +57,7 @@ if (-not (Test-Path $ENV_FILE)) {
     }
 }
 
-# ── Launch Streamlit ───────────────────────────────────────────────────────────
+# Launch Streamlit
 $streamlitExe = Join-Path $VENV_DIR "Scripts\streamlit.exe"
 
 if (-not (Test-Path $streamlitExe)) {
@@ -83,7 +76,6 @@ Write-Host ""
 
 Set-Location $REPO_DIR
 
-# Run Streamlit — it opens the browser automatically
 & $streamlitExe run $APP_FILE `
     --server.headless false `
     --browser.gatherUsageStats false `
@@ -93,7 +85,6 @@ Set-Location $REPO_DIR
     --theme.secondaryBackgroundColor "#1e1e2e" `
     --theme.textColor "#fafafa"
 
-# ── If it exits ────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "  TradeAgent has stopped." -ForegroundColor Yellow
 Read-Host "Press Enter to close"

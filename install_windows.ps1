@@ -1,12 +1,12 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    TradeAgent — Windows Installer
+    TradeAgent - Windows Installer
     Sets up Python dependencies and creates a desktop shortcut.
 
 .DESCRIPTION
     Run this once after cloning the repo:
-        Right-click install_windows.ps1 → "Run with PowerShell"
+        Right-click install_windows.ps1 -> "Run with PowerShell"
     Or from a PowerShell window:
         Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
         .\install_windows.ps1
@@ -25,11 +25,11 @@ $ENV_FILE  = Join-Path $REPO_DIR ".env"
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  TradeAgent — Windows Installer" -ForegroundColor Cyan
+Write-Host "  TradeAgent - Windows Installer" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ── 1. Check Python ────────────────────────────────────────────────────────────
+# 1. Check Python
 Write-Host "[1/5] Checking Python installation..." -ForegroundColor Yellow
 
 $pythonCmd = $null
@@ -58,7 +58,7 @@ if (-not $pythonCmd) {
     exit 1
 }
 
-# ── 2. Create/update virtual environment ──────────────────────────────────────
+# 2. Create virtual environment
 Write-Host "[2/5] Setting up virtual environment..." -ForegroundColor Yellow
 
 $venvDir = Join-Path $REPO_DIR ".venv"
@@ -72,13 +72,13 @@ if (-not (Test-Path $venvDir)) {
     }
     Write-Host "  Created." -ForegroundColor Green
 } else {
-    Write-Host "  Virtual environment already exists — skipping." -ForegroundColor Green
+    Write-Host "  Virtual environment already exists - skipping." -ForegroundColor Green
 }
 
 $pipExe = Join-Path $venvDir "Scripts\pip.exe"
 $pyExe  = Join-Path $venvDir "Scripts\python.exe"
 
-# ── 3. Install dependencies ────────────────────────────────────────────────────
+# 3. Install dependencies
 Write-Host "[3/5] Installing Python packages (this may take a minute)..." -ForegroundColor Yellow
 
 $reqFile = Join-Path $REPO_DIR "requirements.txt"
@@ -97,7 +97,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "  All packages installed." -ForegroundColor Green
 
-# ── 4. .env file setup ─────────────────────────────────────────────────────────
+# 4. .env file setup
 Write-Host "[4/5] Checking .env configuration..." -ForegroundColor Yellow
 
 if (-not (Test-Path $ENV_FILE)) {
@@ -123,7 +123,7 @@ if (-not (Test-Path $ENV_FILE)) {
     }
 }
 
-# ── 5. Create desktop shortcut ─────────────────────────────────────────────────
+# 5. Create desktop shortcut
 Write-Host "[5/5] Creating desktop shortcut..." -ForegroundColor Yellow
 
 $launchScript = Join-Path $REPO_DIR "launch.ps1"
@@ -133,14 +133,12 @@ $shortcutPath = Join-Path $desktopPath "TradeAgent.lnk"
 $shell    = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 
-# Use powershell.exe to run the launch script
 $shortcut.TargetPath       = "powershell.exe"
 $shortcut.Arguments        = "-ExecutionPolicy Bypass -WindowStyle Normal -File `"$launchScript`""
 $shortcut.WorkingDirectory = $REPO_DIR
-$shortcut.WindowStyle      = 1  # Normal window
-$shortcut.Description      = "Launch TradeAgent — AI Trading Analysis"
+$shortcut.WindowStyle      = 1
+$shortcut.Description      = "Launch TradeAgent - AI Trading Analysis"
 
-# Try to use a nice icon (Python icon as fallback)
 $pythonIconPath = Join-Path $venvDir "Scripts\python.exe"
 if (Test-Path $pythonIconPath) {
     $shortcut.IconLocation = "$pythonIconPath,0"
@@ -155,7 +153,7 @@ if (Test-Path $shortcutPath) {
     Write-Host "  You can still launch via: .\launch.ps1" -ForegroundColor Yellow
 }
 
-# ── Done ───────────────────────────────────────────────────────────────────────
+# Done
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Installation complete!" -ForegroundColor Green
