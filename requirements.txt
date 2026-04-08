@@ -4,3 +4,5 @@ pandas>=2.0.0
 numpy>=1.26.0
 rich>=13.7.0
 python-dotenv>=1.0.0
+streamlit>=1.35.0
+schwab-py>=1.4.0

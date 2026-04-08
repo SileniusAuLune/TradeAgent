@@ -347,3 +347,23 @@ class TradingAgent:
 
         print()
         return full_response
+
+    def stream_analysis(self, context: str, asset_type: str = "Asset"):
+        """
+        Generator that yields text chunks — used by the Streamlit front-end.
+        Pass the pre-built context string from build_context().
+        """
+        user_message = (
+            f"Analyse the following {asset_type} and provide a complete "
+            f"trading recommendation with specific price levels:\n\n{context}"
+        )
+
+        with self.client.messages.stream(
+            model=self.model,
+            max_tokens=4096,
+            thinking={"type": "adaptive"},
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
