@@ -31,6 +31,11 @@ from agent import TradingAgent, build_context
 from paper_trader import PaperTrader
 from scanner import run_scan, build_scan_prompt, UNIVERSES, UNIVERSE_MOMENTUM
 from trade_loop import AgentLoop
+try:
+    from streamlit_autorefresh import st_autorefresh as _st_autorefresh
+    _HAS_AUTOREFRESH = True
+except ImportError:
+    _HAS_AUTOREFRESH = False
 from schwab_client import SchwabClient, setup_guide
 from daily_review import stream_review, list_past_reviews
 from monthly_summary import stream_monthly_summary, save_monthly_summary, list_monthly_summaries
@@ -825,6 +830,10 @@ with tab_loop:
 
     loop: AgentLoop = st.session_state.get("agent_loop")
 
+    # ── Auto-refresh every 20s while running ───────────────────────────────
+    if loop and loop.is_running and _HAS_AUTOREFRESH:
+        _st_autorefresh(interval=20_000, key="loop_autorefresh")
+
     # ── Status banner ──────────────────────────────────────────────────────
     if loop and loop.is_running:
         status = loop.status
@@ -833,12 +842,38 @@ with tab_loop:
             if st.button("Resume Loop", key="loop_resume"):
                 loop.resume()
                 st.rerun()
+        elif "market closed" in status:
+            st.info(
+                f"Market closed — loop is running and will resume at 9:30 AM ET.  \n"
+                f"Last activity: {loop._last_cycle or 'none yet'}  |  "
+                f"Cycles completed: {loop._cycle_count}",
+                icon="🌙"
+            )
+        elif "scanning" in status or "thinking" in status:
+            st.warning(f"⚡ {status}", icon="⚡")
         else:
-            st.success(f"Running — {status}", icon="🟢")
+            st.success(
+                f"Running  |  Cycles: {loop._cycle_count}  |  "
+                f"Last scan: {loop._last_cycle or 'pending...'}  |  "
+                f"Next in ~{loop.interval}s",
+                icon="🟢"
+            )
     elif loop and not loop.is_running:
         st.warning("Loop stopped.", icon="🟡")
     else:
         st.info("Loop is not running. Configure below and click Start.", icon="ℹ️")
+
+    # ── Live portfolio snapshot ────────────────────────────────────────────
+    if loop and loop.is_running:
+        pf = st.session_state["paper_trader"].get_portfolio()
+        snap_c1, snap_c2, snap_c3, snap_c4 = st.columns(4)
+        ret_color = "#00d4aa" if pf["total_return"] >= 0 else "#ff6b6b"
+        snap_c1.metric("Cash",          f"${pf['cash_balance']:,.2f}")
+        snap_c2.metric("Positions",     f"${pf['positions_value']:,.2f}")
+        snap_c3.metric("Total Equity",  f"${pf['total_equity']:,.2f}")
+        snap_c4.metric("Return",
+                       f"{pf['total_return_pct']:+.2f}%",
+                       delta=f"${pf['total_return']:+,.2f}")
 
     st.divider()
 
@@ -882,8 +917,9 @@ with tab_loop:
     # ── Start / Stop ───────────────────────────────────────────────────────
     btn_c1, btn_c2, btn_c3 = st.columns(3)
 
+    _loop_btn_label = "Start Loop (LIVE)" if _is_live() else "Start Loop (Paper)"
     start_btn = btn_c1.button(
-        "Start Loop (Paper)",
+        _loop_btn_label,
         type="primary",
         disabled=(loop is not None and loop.is_running),
         use_container_width=True,
