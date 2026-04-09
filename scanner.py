@@ -274,11 +274,16 @@ def _score(r: ScanResult, ind: Dict[str, Any], weights: Optional[Dict[str, float
     if ind.get("macd_crossover"):
         score += 5  * wt("macd"); reasons.append("MACD crossover — fresh signal")
 
-    # ── Volume surge (0–15 pts) ───────────────────────────────────────────
+    # ── Volume (−10 to +15 pts) ───────────────────────────────────────────
+    # Low volume = weak conviction; penalise it so thin setups don't score high
     if r.volume_ratio >= 2.5:
         score += 15 * wt("volume"); reasons.append(f"{r.volume_ratio:.1f}x avg volume — strong interest")
     elif r.volume_ratio >= 1.5:
         score += 8  * wt("volume"); reasons.append(f"{r.volume_ratio:.1f}x avg volume")
+    elif r.volume_ratio < 0.5:
+        score -= 10; reasons.append(f"{r.volume_ratio:.1f}x avg volume — very thin, avoid")
+    elif r.volume_ratio < 0.8:
+        score -= 5;  reasons.append(f"{r.volume_ratio:.1f}x avg volume — below average")
 
     # ── BB squeeze breakout (0–10 pts) ────────────────────────────────────
     if r.bb_squeeze:
