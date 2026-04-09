@@ -867,13 +867,46 @@ with tab_loop:
     if loop and loop.is_running:
         pf = st.session_state["paper_trader"].get_portfolio()
         snap_c1, snap_c2, snap_c3, snap_c4 = st.columns(4)
-        ret_color = "#00d4aa" if pf["total_return"] >= 0 else "#ff6b6b"
         snap_c1.metric("Cash",          f"${pf['cash_balance']:,.2f}")
         snap_c2.metric("Positions",     f"${pf['positions_value']:,.2f}")
         snap_c3.metric("Total Equity",  f"${pf['total_equity']:,.2f}")
         snap_c4.metric("Return",
                        f"{pf['total_return_pct']:+.2f}%",
                        delta=f"${pf['total_return']:+,.2f}")
+
+        # ── Open Positions table ───────────────────────────────────────────
+        positions = pf.get("positions", [])
+        if positions:
+            st.markdown("#### Open Positions")
+            pos_rows = []
+            for pos in positions:
+                sym      = pos["symbol"]
+                shares   = pos["shares"]
+                avg_cost = pos["avg_cost"]
+                stop     = pos.get("stop_loss", 0)
+                target   = pos.get("target", 0)
+                try:
+                    md       = fetch_market_data(sym, period="1d")
+                    cur_price= md["current_price"]
+                except Exception:
+                    cur_price= avg_cost
+                pnl_pct  = ((cur_price - avg_cost) / avg_cost) * 100
+                pnl_usd  = (cur_price - avg_cost) * shares
+                pos_rows.append({
+                    "Symbol"   : sym,
+                    "Shares"   : int(shares),
+                    "Entry"    : f"${avg_cost:,.2f}",
+                    "Current"  : f"${cur_price:,.2f}",
+                    "P&L $"    : f"${pnl_usd:+,.2f}",
+                    "P&L %"    : f"{pnl_pct:+.2f}%",
+                    "Stop"     : f"${stop:,.2f}" if stop else "—",
+                    "Target"   : f"${target:,.2f}" if target else "—",
+                })
+            import pandas as _pd
+            df_pos = _pd.DataFrame(pos_rows)
+            st.dataframe(df_pos, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No open positions.")
 
     st.divider()
 
@@ -999,15 +1032,23 @@ with tab_loop:
                 evt_type  = evt.get("type", "")
 
                 if evt_type == "trade":
-                    action = evt.get("action", "")
-                    sym    = evt.get("symbol", "")
-                    price  = evt.get("price", 0)
-                    icon   = "🟢" if action == "BUY" else "🔴"
-                    pnl_str = f"  P&L: ${evt['realised_pnl']:+,.2f}" if "realised_pnl" in evt else ""
+                    action  = evt.get("action", "")
+                    sym     = evt.get("symbol", "")
+                    price   = evt.get("price", 0)
+                    shares  = evt.get("shares", "")
+                    amount  = evt.get("amount", 0)
+                    icon    = "🟢" if action == "BUY" else "🔴"
+                    pnl_str = f"  |  P&L: **${evt['realised_pnl']:+,.2f}**" if "realised_pnl" in evt else ""
+                    size_str= f" × {shares} (${amount:,.0f})" if action == "BUY" and shares else ""
+                    rationale = evt.get("rationale", "")
                     st.markdown(
-                        f"`{ts}` {icon} **{action} {sym}** @ ${price:,.2f}{pnl_str}  \n"
-                        f"_{evt.get('rationale', '')[:100]}_"
+                        f"`{ts}` {icon} **{action} {sym}**{size_str} @ ${price:,.2f}{pnl_str}"
+                        + (f"  \n_{rationale[:120]}_" if rationale else "")
                     )
+
+                elif evt_type == "claude_decision":
+                    with st.expander(f"`{ts}` 🧠 Claude decision (cycle {evt.get('cycle', '')})", expanded=False):
+                        st.text(evt.get("response", "")[:1000])
 
                 elif evt_type == "scan":
                     st.markdown(
@@ -1026,7 +1067,7 @@ with tab_loop:
                     reason = evt.get("reason", "")
                     pnl    = evt.get("pnl", 0)
                     color  = "🟢" if pnl >= 0 else "🔴"
-                    st.markdown(f"`{ts}` {color} **EXIT {sym}** — {reason}  P&L: ${pnl:+,.2f}")
+                    st.markdown(f"`{ts}` {color} **EXIT {sym}** — {reason}  |  P&L: **${pnl:+,.2f}**")
 
                 elif evt_type == "error":
                     st.markdown(f"`{ts}` ⚠️ Error — {evt.get('message','')}")
