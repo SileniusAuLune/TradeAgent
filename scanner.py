@@ -46,12 +46,91 @@ UNIVERSE_SHORT_TERM = [
     "GOOGL", "AMZN", "NFLX", "CRM", "SHOP",
 ]
 
+# Small & mid cap momentum — higher volatility, bigger % moves
+# These names regularly move 5-20%+ in a single session
+UNIVERSE_SMALL_MID = [
+    # Quantum computing (extremely volatile, theme-driven)
+    "IONQ", "RGTI", "QUBT", "ARQQ",
+    # Space / eVTOL
+    "RKLB", "LUNR", "JOBY", "ACHR",
+    # Crypto mining / blockchain stocks
+    "MARA", "RIOT", "CLSK", "HUT",
+    # AI small-cap
+    "AI", "SOUN", "BBAI", "PRCT",
+    # Fintech disruptors
+    "AFRM", "UPST", "DAVE",
+    # High-growth consumer
+    "HIMS", "CELH", "CVNA",
+    # Clean energy momentum
+    "PLUG", "NOVA", "ARRY",
+    # Biotech with catalyst potential
+    "RXRX", "BEAM", "CRSP", "SRPT",
+]
+
+# Crypto-adjacent equities: move with BTC/ETH but are stocks
+UNIVERSE_CRYPTO = [
+    "MSTR", "COIN", "MARA", "RIOT", "CLSK", "HUT", "BTBT",
+    "HOOD", "SQ", "PYPL", "NVDA", "AMD", "SMCI",
+    "IBIT", "FBTC",   # spot Bitcoin ETFs
+]
+
+# Biotech & health catalyst plays — binary event movers
+UNIVERSE_BIOTECH = [
+    "MRNA", "BNTX", "CRSP", "BEAM", "EDIT", "RXRX", "SRPT",
+    "ARKG", "LABU",   # sector ETFs
+    "HIMS", "GILD", "REGN", "VRTX",
+    "ACMR", "PRCT", "INVA",
+]
+
+# Broad sweep: all of the above de-duped — cast the widest net
+UNIVERSE_BROAD = list(dict.fromkeys(
+    UNIVERSE_SHORT_TERM
+    + UNIVERSE_SMALL_MID
+    + UNIVERSE_CRYPTO
+    + UNIVERSE_HIGH_BETA
+))
+
 UNIVERSES = {
     "Short-Term Swing (recommended)": UNIVERSE_SHORT_TERM,
+    "Small & Mid Cap (high volatility)": UNIVERSE_SMALL_MID,
+    "Crypto-Adjacent"                : UNIVERSE_CRYPTO,
+    "Biotech Catalysts"              : UNIVERSE_BIOTECH,
+    "Broad (all universes)"          : UNIVERSE_BROAD,
     "Momentum"                       : UNIVERSE_MOMENTUM,
     "Large Cap"                      : UNIVERSE_LARGE_CAP,
     "High Beta"                      : UNIVERSE_HIGH_BETA,
 }
+
+
+def fetch_top_movers(n: int = 25) -> List[str]:
+    """
+    Fetch today's most-active / top-gaining symbols from Yahoo Finance.
+    Returns a list of ticker strings.  Falls back to UNIVERSE_SHORT_TERM on error.
+    """
+    try:
+        import yfinance as yf
+        # yfinance Screener API (available in >= 0.2.37)
+        screener = yf.Screener()
+        # Most actives by dollar volume — best proxy for liquid movers
+        screener.set_predefined_body("most_actives")
+        quotes = screener.response.get("quotes", [])
+        symbols = [q["symbol"] for q in quotes if "symbol" in q]
+        if symbols:
+            return symbols[:n]
+    except Exception:
+        pass
+    # Fallback: day-gainers screener
+    try:
+        import yfinance as yf
+        screener = yf.Screener()
+        screener.set_predefined_body("day_gainers")
+        quotes = screener.response.get("quotes", [])
+        symbols = [q["symbol"] for q in quotes if "symbol" in q]
+        if symbols:
+            return symbols[:n]
+    except Exception:
+        pass
+    return list(UNIVERSE_SHORT_TERM)
 
 
 @dataclass

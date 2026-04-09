@@ -29,7 +29,7 @@ from technical import calculate_indicators
 from fundamental import fetch_stock_fundamentals, fetch_market_context
 from agent import TradingAgent, build_context
 from paper_trader import PaperTrader
-from scanner import run_scan, build_scan_prompt, UNIVERSES, UNIVERSE_MOMENTUM
+from scanner import run_scan, build_scan_prompt, UNIVERSES, UNIVERSE_MOMENTUM, fetch_top_movers
 from trade_loop import AgentLoop
 try:
     from streamlit_autorefresh import st_autorefresh as _st_autorefresh
@@ -665,31 +665,44 @@ with tab_scanner:
 
     # ── Config row ─────────────────────────────────────────────────────────
     sc1, sc2, sc3, sc4 = st.columns([2, 1, 1, 1])
+    _scan_universe_opts = ["Top Daily Movers (auto)"] + list(UNIVERSES.keys())
     universe_name = sc1.selectbox(
         "Universe",
-        options=list(UNIVERSES.keys()),
+        options=_scan_universe_opts,
         key="scan_universe",
+        help="'Top Daily Movers' pulls Yahoo Finance most-actives — finds what's moving right now.",
     )
-    top_n      = sc2.slider("Show top N", 3, 15, 8, key="scan_top_n")
+    top_n      = sc2.slider("Show top N", 3, 20, 8, key="scan_top_n")
     ask_claude = sc3.checkbox("Claude ranking", value=True, key="scan_claude")
     scan_btn   = sc4.button("Run Scan", type="primary", use_container_width=True, key="scan_run")
 
     # Custom tickers
     custom_raw = st.text_input(
-        "Custom tickers (overrides universe)",
-        placeholder="e.g. AAPL NVDA TSLA AMD PLTR",
+        "Custom tickers (overrides universe, space-separated)",
+        placeholder="e.g. IONQ HIMS MARA RKLB AFRM SOUN",
         key="scan_custom",
     )
+
+    # Universe preview
+    if not custom_raw.strip():
+        if universe_name == "Top Daily Movers (auto)":
+            st.caption("Will fetch Yahoo Finance most-active symbols when you run the scan.")
+        else:
+            preview = UNIVERSES.get(universe_name, [])
+            st.caption(f"{len(preview)} symbols: {', '.join(preview)}")
 
     if scan_btn:
         if not _api_key() and ask_claude:
             st.error("Set ANTHROPIC_API_KEY in .env to get Claude's ranking.")
         else:
-            symbols = (
-                [s.upper() for s in custom_raw.split() if s.strip()]
-                if custom_raw.strip()
-                else UNIVERSES[universe_name]
-            )
+            if custom_raw.strip():
+                symbols = [s.upper() for s in custom_raw.split() if s.strip()]
+            elif universe_name == "Top Daily Movers (auto)":
+                with st.spinner("Fetching top movers from Yahoo Finance..."):
+                    symbols = fetch_top_movers(n=25)
+                st.caption(f"Scanning {len(symbols)} movers: {', '.join(symbols[:12])}{'…' if len(symbols) > 12 else ''}")
+            else:
+                symbols = UNIVERSES[universe_name]
 
             scan_status = st.empty()
             scan_status.info(f"Scanning {len(symbols)} tickers in parallel…", icon="🔍")
@@ -931,12 +944,29 @@ with tab_loop:
             min_value=0.0, value=500.0, step=50.0, format="%.0f", key="cfg_max_loss",
         )
 
-        cfg_universe    = st.selectbox("Scan universe", list(UNIVERSES.keys()), key="cfg_universe")
+        _universe_opts = ["Top Daily Movers (auto)"] + list(UNIVERSES.keys())
+        cfg_universe    = st.selectbox(
+            "Scan universe",
+            _universe_opts,
+            key="cfg_universe",
+            help=(
+                "Top Daily Movers fetches Yahoo Finance's most-active list each cycle — "
+                "small/mid caps moving NOW. Other options are fixed curated lists."
+            ),
+        )
         cfg_custom_syms = st.text_input(
-            "Custom symbols (overrides universe)",
-            placeholder="AAPL NVDA TSLA",
+            "Custom symbols (overrides universe, space-separated)",
+            placeholder="IONQ HIMS MARA RKLB AFRM",
             key="cfg_custom_syms",
         )
+
+        # Show which symbols will be scanned
+        if not cfg_custom_syms.strip():
+            if cfg_universe == "Top Daily Movers (auto)":
+                st.caption("Symbols resolved live each cycle from Yahoo Finance most-actives.")
+            else:
+                preview = UNIVERSES.get(cfg_universe, [])
+                st.caption(f"{len(preview)} symbols: {', '.join(preview)}")
 
         st.markdown("---")
         st.markdown(
@@ -978,11 +1008,14 @@ with tab_loop:
                 icon="⚠️",
             )
         else:
-            symbols = (
-                [s.upper() for s in cfg_custom_syms.split() if s.strip()]
-                if cfg_custom_syms.strip()
-                else UNIVERSES[cfg_universe]
-            )
+            if cfg_custom_syms.strip():
+                symbols = [s.upper() for s in cfg_custom_syms.split() if s.strip()]
+            elif cfg_universe == "Top Daily Movers (auto)":
+                with st.spinner("Fetching today's top movers from Yahoo Finance..."):
+                    symbols = fetch_top_movers(n=25)
+                st.info(f"Top movers loaded: {', '.join(symbols[:10])}{'…' if len(symbols) > 10 else ''}")
+            else:
+                symbols = UNIVERSES[cfg_universe]
             new_loop = AgentLoop(
                 api_key             = _api_key(),
                 paper_trader        = st.session_state["paper_trader"],
