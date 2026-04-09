@@ -279,7 +279,7 @@ class AgentLoop:
         open_count   = len(pf["positions"])
         cash         = pf["cash_balance"]
         equity       = pf["total_equity"]
-        existing_syms= list(pf["positions"].keys())
+        existing_syms= [p["symbol"] for p in pf["positions"]]
 
         prompt = self._build_agent_prompt(strong, cash, equity, existing_syms, open_count)
 
@@ -408,10 +408,11 @@ class AgentLoop:
 
         if action == "BUY":
             pf = self.pt.get_portfolio()
-            if len(pf["positions"]) >= self.max_open_positions:
+            open_syms = [p["symbol"] for p in pf["positions"]]
+            if len(open_syms) >= self.max_open_positions:
                 log.info("Max positions reached — skipping %s", sym)
                 return
-            if sym in pf["positions"]:
+            if sym in open_syms:
                 log.info("Already holding %s — skipping", sym)
                 return
 
@@ -458,9 +459,8 @@ class AgentLoop:
                     log.error("Live order failed: %s", exc)
 
         elif action == "SELL":
-            pf  = self.pt.get_portfolio()
-            pos = pf["positions"]
-            holding = next((p for p in pos if p["symbol"] == sym), None)
+            pf      = self.pt.get_portfolio()
+            holding = next((p for p in pf["positions"] if p["symbol"] == sym), None)
             if not holding:
                 log.info("SELL signal for %s but not held", sym)
                 return
