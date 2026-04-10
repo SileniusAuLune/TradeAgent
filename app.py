@@ -651,6 +651,35 @@ with tab_history:
                 mime="text/csv",
             )
 
+    # ── Time-of-Day Performance Breakdown ─────────────────────────────────
+    st.divider()
+    st.subheader("Performance by Time of Day")
+    st.caption("When are trades entered making the most money? (requires closed trades with entry_time)")
+    tod = st.session_state["paper_trader"].time_of_day_stats()
+    has_data = any(v["trades"] > 0 for v in tod.values())
+    if has_data:
+        tod_rows = []
+        for session, stats in tod.items():
+            if stats["trades"] > 0:
+                tod_rows.append({
+                    "Session"    : session,
+                    "Trades"     : stats["trades"],
+                    "Win Rate"   : f"{stats['win_rate']:.0f}%",
+                    "Avg P&L"    : f"${stats['avg_pnl']:+,.2f}",
+                    "Total P&L"  : f"${stats['total_pnl']:+,.2f}",
+                })
+        import pandas as _pd3
+        st.dataframe(_pd3.DataFrame(tod_rows), use_container_width=True, hide_index=True)
+        best = max(tod.items(), key=lambda x: x[1]["total_pnl"])
+        if best[1]["trades"] > 0:
+            st.info(
+                f"Best session so far: **{best[0].strip()}** — "
+                f"{best[1]['win_rate']:.0f}% win rate, avg ${best[1]['avg_pnl']:+,.2f} per trade",
+                icon="📊"
+            )
+    else:
+        st.caption("No closed trades with entry timestamps yet — data appears after the first exits.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SCANNER TAB
@@ -925,6 +954,27 @@ with tab_loop:
         else:
             st.caption("No open positions.")
 
+        # ── Pre-market watchlist ───────────────────────────────────────────
+        pm_watchlist = getattr(loop, "_premarket_watchlist", [])
+        if pm_watchlist:
+            st.markdown("#### Pre-market Watchlist")
+            st.caption("Scanned before the open — these setups were primed when the market opened.")
+            pm_rows = []
+            for r in pm_watchlist:
+                pm_rows.append({
+                    "Symbol" : r.symbol,
+                    "Score"  : r.score,
+                    "Signal" : r.signal,
+                    "Price"  : f"${r.price:,.2f}",
+                    "Vol"    : f"{r.volume_ratio:.1f}x",
+                    "Gap"    : f"{r.gap_pct:+.1f}%",
+                    "PM Gap" : f"{r.premarket_gap_pct:+.1f}%" if r.premarket_gap_pct else "—",
+                    "Earnings": f"in {r.earnings_in_days}d" if r.earnings_in_days is not None else "—",
+                    "Reasons": " · ".join(r.reasons[:3]),
+                })
+            import pandas as _pd2
+            st.dataframe(_pd2.DataFrame(pm_rows), use_container_width=True, hide_index=True)
+
     st.divider()
 
     # ── Configuration ──────────────────────────────────────────────────────
@@ -1140,6 +1190,16 @@ with tab_loop:
                     sym = evt.get("symbol", "")
                     pct = evt.get("pnl_pct", 0)
                     st.markdown(f"`{ts}` 🔒 **Trail active {sym}** — locked in at +{pct:.1f}%")
+
+                elif evt_type == "correlation_skip":
+                    sym   = evt.get("symbol", "")
+                    group = evt.get("group", "")
+                    held  = evt.get("held", [])
+                    st.markdown(f"`{ts}` 🔗 Skipped **{sym}** — already hold `{', '.join(held)}` in `{group}` group")
+
+                elif evt_type == "premarket_scan":
+                    tickers = evt.get("tickers", [])
+                    st.markdown(f"`{ts}` 🌅 Pre-market scan — {evt.get('count', 0)} setups: {', '.join(tickers)}")
 
                 elif evt_type == "error":
                     st.markdown(f"`{ts}` ⚠️ Error — {evt.get('message','')}")

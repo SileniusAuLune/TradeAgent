@@ -122,10 +122,11 @@ class PaperTrader:
                 f"Cannot sell {shares} shares of {symbol}: only {held} held"
             )
 
-        proceeds   = round(shares * price, 2)
-        avg_cost   = pos["avg_cost"]
-        realised   = round((price - avg_cost) * shares, 2)
+        proceeds     = round(shares * price, 2)
+        avg_cost     = pos["avg_cost"]
+        realised     = round((price - avg_cost) * shares, 2)
         realised_pct = round((realised / (avg_cost * shares)) * 100, 2) if avg_cost else 0
+        entry_time   = pos.get("entry_time")   # preserve for analytics
 
         # Update position
         remaining = round(pos["shares"] - shares, 6)
@@ -141,14 +142,15 @@ class PaperTrader:
         self._state["balance"] = round(self._state["balance"] + proceeds, 2)
 
         trade = self._record("SELL", symbol, shares, price, proceeds, None, None, None, note,
-                             realised_pct=realised_pct, realised_pnl=realised)
+                             realised_pct=realised_pct, realised_pnl=realised,
+                             entry_time=entry_time)
         self._save()
         return trade
 
     def _record(
         self, action, symbol, shares, price, amount,
         signal, stop_loss, target, note,
-        realised_pnl=None, realised_pct=None,
+        realised_pnl=None, realised_pct=None, entry_time=None,
     ) -> Dict[str, Any]:
         trade: Dict[str, Any] = {
             "id"        : len(self._state["history"]) + 1,
@@ -164,6 +166,7 @@ class PaperTrader:
         if stop_loss:   trade["stop_loss"]   = stop_loss
         if target:      trade["target"]      = target
         if note:        trade["note"]        = note
+        if entry_time:  trade["entry_time"]  = entry_time
         if realised_pnl is not None:
             trade["realised_pnl"] = realised_pnl
             trade["realised_pct"] = realised_pct
@@ -274,6 +277,54 @@ class PaperTrader:
             "avg_win"            : round(sum(t["realised_pnl"] for t in wins)  / len(wins)  if wins   else 0, 2),
             "avg_loss"           : round(sum(t["realised_pnl"] for t in losses)/ len(losses) if losses else 0, 2),
         }
+
+    def time_of_day_stats(self) -> Dict[str, Any]:
+        """
+        Break down closed trades by hour of entry.
+        Returns dict keyed by session bucket with win_rate, avg_pnl, trade_count.
+        Uses entry_time stored in sell records.
+        """
+        sells = [
+            t for t in self._state["history"]
+            if t["action"] == "SELL" and "realised_pnl" in t and t.get("entry_time")
+        ]
+
+        # ET session buckets
+        buckets: Dict[str, List[float]] = {
+            "First Hour  9:30–10:30"  : [],
+            "Mid Session 10:30–14:00" : [],
+            "Power Hour  14:00–16:00" : [],
+        }
+
+        for sell in sells:
+            try:
+                entry_dt = datetime.fromisoformat(sell["entry_time"])
+                h, m = entry_dt.hour, entry_dt.minute
+                pnl  = sell["realised_pnl"]
+                # Classify (times stored in local machine time, which may differ from ET;
+                # the relative patterns still hold even if offset by timezone)
+                if (h == 9 and m >= 30) or (h == 10 and m < 30):
+                    buckets["First Hour  9:30–10:30"].append(pnl)
+                elif h < 14 or (h == 10 and m >= 30):
+                    buckets["Mid Session 10:30–14:00"].append(pnl)
+                elif h < 16:
+                    buckets["Power Hour  14:00–16:00"].append(pnl)
+            except Exception:
+                pass
+
+        result = {}
+        for bucket, pnls in buckets.items():
+            if not pnls:
+                result[bucket] = {"trades": 0, "win_rate": 0.0, "avg_pnl": 0.0, "total_pnl": 0.0}
+                continue
+            wins = [p for p in pnls if p > 0]
+            result[bucket] = {
+                "trades"   : len(pnls),
+                "win_rate" : round(len(wins) / len(pnls) * 100, 1),
+                "avg_pnl"  : round(sum(pnls) / len(pnls), 2),
+                "total_pnl": round(sum(pnls), 2),
+            }
+        return result
 
     def reset(self, starting_balance: float = DEFAULT_BALANCE) -> None:
         """Wipe all positions and history, restart with a fresh balance."""

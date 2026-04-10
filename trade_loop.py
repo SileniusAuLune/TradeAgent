@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 
 import anthropic
 
-from scanner import run_scan, build_scan_prompt, UNIVERSE_MOMENTUM
+from scanner import run_scan, build_scan_prompt, UNIVERSE_MOMENTUM, ScanResult
 from paper_trader import PaperTrader
 from market_data import fetch_market_data, fetch_vix, fetch_news
 from strategy import get_strategy
@@ -47,6 +47,20 @@ logging.basicConfig(
 )
 
 LOOP_LOG_FILE = Path("trade_loop_log.jsonl")
+
+# ── Correlation groups — one position per group maximum ───────────────────────
+# Stocks in the same group move together; holding multiples triples risk on one theme.
+CORRELATION_GROUPS: Dict[str, set] = {
+    "semis"         : {"NVDA", "AMD", "SMCI", "SOXL", "SOXS", "SOXX", "INTC", "QCOM", "TQQQ"},
+    "crypto"        : {"MSTR", "COIN", "MARA", "RIOT", "CLSK", "HUT", "BTBT", "IBIT", "FBTC"},
+    "biotech"       : {"CRSP", "BEAM", "RXRX", "LABU", "ARKG", "MRNA", "BNTX", "SRPT", "EDIT"},
+    "quantum"       : {"IONQ", "RGTI", "QUBT", "ARQQ"},
+    "ev_space"      : {"TSLA", "RIVN", "RKLB", "JOBY", "LCID", "ACHR", "LUNR"},
+    "ai_small"      : {"AI", "SOUN", "BBAI", "PLTR"},
+    "fintech"       : {"SOFI", "AFRM", "UPST", "HOOD", "DAVE"},
+    "mega_tech"     : {"AAPL", "MSFT", "GOOGL", "AMZN", "META"},
+    "leveraged_bull": {"TQQQ", "SOXL", "LABU", "FNGU", "UPRO"},
+}
 
 
 def _append_log(event: Dict[str, Any]):
@@ -161,7 +175,8 @@ class AgentLoop:
         self._status      : str  = "idle"
         self._cycle_count : int  = 0
         self._last_cycle  : Optional[str] = None
-        self._vix_info    : Dict  = {}    # cached per cycle
+        self._vix_info          : Dict       = {}   # cached per cycle
+        self._premarket_watchlist: List[Any] = []   # top setups from pre-market scan
         self._event_log   : List[Dict]    = []   # in-memory for UI
         self._paused_reason: Optional[str] = None
 
@@ -219,6 +234,21 @@ class AgentLoop:
         log.info("AgentLoop stopped after %d cycles", self._cycle_count)
 
     @staticmethod
+    def _is_premarket() -> bool:
+        """Returns True during pre-market hours (8:00–9:29 AM ET, Mon–Fri)."""
+        try:
+            import pytz
+            from datetime import time as _time
+            et  = pytz.timezone("US/Eastern")
+            now = datetime.now(et)
+            if now.weekday() >= 5:
+                return False
+            t = now.time()
+            return _time(8, 0) <= t < _time(9, 30)
+        except Exception:
+            return False
+
+    @staticmethod
     def _market_is_open() -> bool:
         """
         Returns True if US equity markets are currently open (9:30–16:00 ET, Mon–Fri).
@@ -242,13 +272,17 @@ class AgentLoop:
         self._last_cycle = cycle_ts
         log.info("── Cycle %d @ %s ──", self._cycle_count, cycle_ts)
 
-        # ── Market hours check — skip new entries outside 9:30–16:00 ET ───
+        # ── Market hours check ────────────────────────────────────────────
         market_open = self._market_is_open()
         if not market_open:
-            self._status = f"market closed (last: {cycle_ts})"
-            log.info("Market closed — checking exits only")
-            # Still check exits (in case a stop was hit on a foreign exchange
-            # or we need to clean up), but don't open new positions
+            if self._is_premarket():
+                # Run a scan during pre-market to warm up the watchlist
+                self._status = f"pre-market scan ({cycle_ts})"
+                log.info("Pre-market window — building watchlist")
+                self._run_premarket_scan()
+            else:
+                self._status = f"market closed (last: {cycle_ts})"
+                log.info("Market closed — checking exits only")
             self._check_exits()
             return
 
@@ -331,6 +365,62 @@ class AgentLoop:
             self._execute(dec, equity, cash)
 
         self._status = f"idle (last: {cycle_ts})"
+
+    # ── Pre-market scan ────────────────────────────────────────────────────────
+
+    def _run_premarket_scan(self):
+        """
+        Scan during the 8:00–9:29 AM ET pre-market window.
+        Builds a watchlist so the first market-open cycle is already primed.
+        Results are stored in self._premarket_watchlist.
+        """
+        try:
+            sm      = get_strategy()
+            results = run_scan(
+                self.symbols, max_workers=10, top_n=self.top_n_scan,
+                weights          = sm.scanner_weights(),
+                avoid_symbols    = sm.get("avoid_symbols", []),
+                preferred_symbols= sm.get("preferred_symbols", []),
+            )
+            strong = [r for r in results if r.score >= self.min_score_threshold and not r.error]
+            self._premarket_watchlist = strong
+            self._log_event("premarket_scan", {
+                "count"  : len(strong),
+                "tickers": [r.symbol for r in strong],
+                "top"    : [f"{r.symbol}({r.score:.0f})" for r in strong[:5]],
+            })
+            log.info("Pre-market: %d setups above threshold: %s",
+                     len(strong), [r.symbol for r in strong])
+        except Exception as exc:
+            log.error("Pre-market scan error: %s", exc)
+
+    # ── Correlation guard ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _correlation_group(symbol: str) -> Optional[str]:
+        """Return the correlation group name for a symbol, or None."""
+        sym = symbol.upper()
+        for group, members in CORRELATION_GROUPS.items():
+            if sym in members:
+                return group
+        return None
+
+    def _is_correlated_with_holdings(self, symbol: str, existing_syms: List[str]) -> bool:
+        """
+        Return True if buying `symbol` would create duplicate theme exposure.
+        We allow at most one position per correlation group.
+        """
+        new_group = self._correlation_group(symbol)
+        if new_group is None:
+            return False  # not in any known group — allow
+        for held in existing_syms:
+            if self._correlation_group(held) == new_group:
+                log.info(
+                    "Correlation block: %s vs %s — both in '%s'",
+                    symbol, held, new_group,
+                )
+                return True
+        return False
 
     # ── Loss-limit guard ───────────────────────────────────────────────────────
 
@@ -500,6 +590,15 @@ class AgentLoop:
                 return
             if sym in open_syms:
                 log.info("Already holding %s — skipping", sym)
+                return
+
+            # Correlation check — avoid doubling up on the same theme
+            if self._is_correlated_with_holdings(sym, open_syms):
+                self._log_event("correlation_skip", {
+                    "symbol": sym,
+                    "group" : self._correlation_group(sym),
+                    "held"  : [s for s in open_syms if self._correlation_group(s) == self._correlation_group(sym)],
+                })
                 return
 
             # VIX regime sizing adjustment

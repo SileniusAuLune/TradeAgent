@@ -5,7 +5,7 @@ Supports major stock tickers and currency pairs.
 
 import yfinance as yf
 import pandas as pd
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 
 # Common forex pairs — map friendly name to yfinance format
 FOREX_MAP = {
@@ -50,6 +50,54 @@ def to_yf_symbol(symbol: str) -> str:
     if is_forex(s) and not s.endswith("=X"):
         return s + "=X"
     return s
+
+
+def fetch_earnings_date(symbol: str) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Return (next_earnings_date_ISO, days_until) for a ticker.
+    Returns (None, None) if unknown or more than 30 days away.
+    Tries earnings_dates first, then falls back to calendar.
+    """
+    try:
+        t = yf.Ticker(to_yf_symbol(symbol))
+        now_utc = pd.Timestamp.now(tz="UTC")
+
+        # Method 1: earnings_dates property (forward-looking table)
+        ed = getattr(t, "earnings_dates", None)
+        if ed is not None and hasattr(ed, "index") and len(ed) > 0:
+            future = ed[ed.index > now_utc]
+            if not future.empty:
+                next_dt = future.index[0]
+                days    = int((next_dt.tz_localize(None) - pd.Timestamp.now()).days)
+                if 0 <= days <= 30:
+                    return next_dt.strftime("%Y-%m-%d"), days
+
+        # Method 2: calendar dict
+        cal = getattr(t, "calendar", None)
+        if isinstance(cal, dict):
+            dates = cal.get("Earnings Date", [])
+            if dates:
+                next_dt = pd.Timestamp(dates[0])
+                days    = int((next_dt - pd.Timestamp.now()).days)
+                if 0 <= days <= 30:
+                    return next_dt.strftime("%Y-%m-%d"), days
+    except Exception:
+        pass
+    return None, None
+
+
+def fetch_premarket_price(symbol: str) -> Optional[float]:
+    """
+    Return the current pre-market price for a ticker, or None if unavailable.
+    Uses yfinance fast_info (low-latency, no full history fetch needed).
+    """
+    try:
+        t  = yf.Ticker(to_yf_symbol(symbol))
+        fi = t.fast_info
+        pm = getattr(fi, "pre_market_price", None)
+        return float(pm) if pm else None
+    except Exception:
+        return None
 
 
 def fetch_news(symbol: str, max_items: int = 5) -> list:

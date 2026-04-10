@@ -10,7 +10,10 @@ import concurrent.futures
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 
-from market_data import fetch_market_data, fetch_news, fetch_intraday_vwap
+from market_data import (
+    fetch_market_data, fetch_news, fetch_intraday_vwap,
+    fetch_earnings_date, fetch_premarket_price,
+)
 from technical import calculate_indicators
 
 
@@ -152,6 +155,9 @@ class ScanResult:
     vwap            : Optional[float] = None   # intraday VWAP price
     above_vwap      : Optional[bool]  = None   # price above/below intraday VWAP
     news            : List[str] = field(default_factory=list)  # recent headlines
+    earnings_date   : Optional[str]  = None    # next earnings date ISO string
+    earnings_in_days: Optional[int]  = None    # days until earnings (None = unknown)
+    premarket_gap_pct: float         = 0.0     # pre-market gap vs prior close
     score           : float = 0.0
     signal          : str   = "NEUTRAL"
     reasons         : List[str] = field(default_factory=list)
@@ -210,6 +216,15 @@ def _scan_one(symbol: str) -> ScanResult:
         # Recent news headlines — catalyst awareness
         news = fetch_news(symbol, max_items=3)
 
+        # Earnings calendar — avoid buying blind into earnings
+        earnings_date, earnings_in_days = fetch_earnings_date(symbol)
+
+        # Pre-market price gap (if market not yet open)
+        premarket_gap_pct = 0.0
+        pm_price = fetch_premarket_price(symbol)
+        if pm_price and md["prev_close"] > 0:
+            premarket_gap_pct = round((pm_price / md["prev_close"] - 1) * 100, 2)
+
         result = ScanResult(
             symbol          = symbol,
             price           = md["current_price"],
@@ -228,6 +243,9 @@ def _scan_one(symbol: str) -> ScanResult:
             vwap            = vwap_price,
             above_vwap      = above_vwap,
             news            = news,
+            earnings_date   = earnings_date,
+            earnings_in_days= earnings_in_days,
+            premarket_gap_pct = premarket_gap_pct,
         )
 
         result.score, result.signal, result.reasons = _score(result, ind, _current_weights)
@@ -359,6 +377,26 @@ def _score(r: ScanResult, ind: Dict[str, Any], weights: Optional[Dict[str, float
     if ind.get("weekly_trend") and "Up" in str(ind.get("weekly_trend", "")):
         score += 3 * wt("weekly_trend")
 
+    # ── Earnings risk (0 to −10 pts) ──────────────────────────────────────
+    # Earnings in 1 day = high binary risk; reduce score so only very
+    # strong setups still clear the threshold. Claude will see the flag too.
+    if r.earnings_in_days is not None:
+        if r.earnings_in_days == 0:
+            score -= 10; reasons.append("⚠️ EARNINGS TODAY — extreme risk")
+        elif r.earnings_in_days == 1:
+            score -= 7;  reasons.append(f"⚠️ Earnings tomorrow — high risk")
+        elif r.earnings_in_days == 2:
+            score -= 3;  reasons.append(f"⚠️ Earnings in 2 days")
+
+    # ── Pre-market gap bonus ───────────────────────────────────────────────
+    # A gap seen in pre-market often continues into the open
+    if r.premarket_gap_pct >= 4:
+        score += 8;  reasons.append(f"Pre-mkt gap +{r.premarket_gap_pct:.1f}% — strong open expected")
+    elif r.premarket_gap_pct >= 2:
+        score += 4;  reasons.append(f"Pre-mkt gap +{r.premarket_gap_pct:.1f}%")
+    elif r.premarket_gap_pct <= -4:
+        score -= 6;  reasons.append(f"Pre-mkt gap {r.premarket_gap_pct:.1f}% — weak open expected")
+
     # ── Signal label ──────────────────────────────────────────────────────
     if score >= 60:
         signal = "STRONG BUY"
@@ -432,6 +470,16 @@ def build_scan_prompt(results: List[ScanResult]) -> str:
         vwap_str = ""
         if r.vwap is not None:
             vwap_str = f"  VWAP={'above' if r.above_vwap else 'BELOW'}"
+
+        earnings_str = ""
+        if r.earnings_in_days is not None:
+            tag = "TODAY" if r.earnings_in_days == 0 else f"in {r.earnings_in_days}d"
+            earnings_str = f"  ⚠️EARNINGS-{tag}"
+
+        premarket_str = ""
+        if abs(r.premarket_gap_pct) >= 1:
+            premarket_str = f"  PM-gap={r.premarket_gap_pct:+.1f}%"
+
         news_str = ""
         if r.news:
             news_str = f"\n      News: {r.news[0][:80]}"
@@ -440,7 +488,8 @@ def build_scan_prompt(results: List[ScanResult]) -> str:
         lines.append(
             f"  {r.symbol:6s}  score={r.score:5.1f}  {r.signal:10s}  "
             f"${r.price:,.2f}  {r.pct_change:+.1f}%  RSI={r.rsi:.0f}  "
-            f"Vol={r.volume_ratio:.1f}x  ADX={r.adx:.0f}{vwap_str}  |  {reasons_str}"
+            f"Vol={r.volume_ratio:.1f}x  ADX={r.adx:.0f}"
+            f"{vwap_str}{earnings_str}{premarket_str}  |  {reasons_str}"
             + news_str
         )
     lines.append(
