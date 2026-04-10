@@ -128,15 +128,15 @@ class PaperTrader:
         realised_pct = round((realised / (avg_cost * shares)) * 100, 2) if avg_cost else 0
         entry_time   = pos.get("entry_time")   # preserve for analytics
 
-        # Update position
+        # Update position — preserve all metadata (entry_time, peak_price, etc.)
         remaining = round(pos["shares"] - shares, 6)
         if remaining <= 1e-9:
             del self._state["positions"][symbol]
         else:
             self._state["positions"][symbol] = {
-                "shares"     : remaining,
-                "avg_cost"   : avg_cost,
-                "total_cost" : round(avg_cost * remaining, 2),
+                **pos,    # keep entry_time, peak_price, trail_active, stop_loss, target, etc.
+                "shares"    : remaining,
+                "total_cost": round(avg_cost * remaining, 2),
             }
 
         self._state["balance"] = round(self._state["balance"] + proceeds, 2)

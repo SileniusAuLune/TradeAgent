@@ -189,7 +189,11 @@ _current_weights: Dict[str, float] = {}   # set by run_scan from strategy
 
 
 def _scan_one(symbol: str) -> ScanResult:
-    """Fetch and score a single ticker. Safe — never raises."""
+    """
+    Fast pass: fetch daily OHLCV + technicals + gap + RS vs SPY.
+    No slow enrichment (VWAP/news/earnings/premarket) — that runs separately
+    on the top_n candidates only.
+    """
     try:
         md  = fetch_market_data(symbol, period="3mo")
         ind = calculate_indicators(md["dataframe"])
@@ -208,23 +212,6 @@ def _scan_one(symbol: str) -> ScanResult:
         tick_5d   = ind.get("perf_5d") or 0.0
         rs_vs_spy = round(float(tick_5d) - spy_perf, 2)
 
-        # Intraday VWAP (5-min bars) — key level for day trading
-        vwap_data   = fetch_intraday_vwap(symbol)
-        vwap_price  = vwap_data.get("vwap")
-        above_vwap  = vwap_data.get("above_vwap")
-
-        # Recent news headlines — catalyst awareness
-        news = fetch_news(symbol, max_items=3)
-
-        # Earnings calendar — avoid buying blind into earnings
-        earnings_date, earnings_in_days = fetch_earnings_date(symbol)
-
-        # Pre-market price gap (if market not yet open)
-        premarket_gap_pct = 0.0
-        pm_price = fetch_premarket_price(symbol)
-        if pm_price and md["prev_close"] > 0:
-            premarket_gap_pct = round((pm_price / md["prev_close"] - 1) * 100, 2)
-
         result = ScanResult(
             symbol          = symbol,
             price           = md["current_price"],
@@ -240,12 +227,6 @@ def _scan_one(symbol: str) -> ScanResult:
             market_structure= ind.get("market_structure", "N/A"),
             gap_pct         = gap_pct,
             rs_vs_spy       = rs_vs_spy,
-            vwap            = vwap_price,
-            above_vwap      = above_vwap,
-            news            = news,
-            earnings_date   = earnings_date,
-            earnings_in_days= earnings_in_days,
-            premarket_gap_pct = premarket_gap_pct,
         )
 
         result.score, result.signal, result.reasons = _score(result, ind, _current_weights)
@@ -258,6 +239,86 @@ def _scan_one(symbol: str) -> ScanResult:
             adx=0, bb_squeeze=False, atr_pct=0, market_structure="?",
             error=str(exc),
         )
+
+
+def _enrich_result(r: ScanResult) -> ScanResult:
+    """
+    Slow enrichment pass: VWAP, news, earnings, pre-market price.
+    Only run on the top_n candidates after the fast scoring pass.
+    """
+    try:
+        vwap_data         = fetch_intraday_vwap(r.symbol)
+        r.vwap            = vwap_data.get("vwap")
+        r.above_vwap      = vwap_data.get("above_vwap")
+    except Exception:
+        pass
+
+    try:
+        r.news = fetch_news(r.symbol, max_items=3)
+    except Exception:
+        pass
+
+    try:
+        r.earnings_date, r.earnings_in_days = fetch_earnings_date(r.symbol)
+    except Exception:
+        pass
+
+    try:
+        pm = fetch_premarket_price(r.symbol)
+        if pm and r.price > 0:
+            # Use current price as proxy for prev_close if not available
+            prev = r.price / (1 + r.pct_change / 100) if r.pct_change else r.price
+            r.premarket_gap_pct = round((pm / prev - 1) * 100, 2) if prev > 0 else 0.0
+    except Exception:
+        pass
+
+    # Re-score with enrichment data (VWAP, earnings, premarket now available)
+    # We can't call _score without ind, but we can apply the VWAP/earnings/premarket
+    # adjustments directly to the existing score
+    if r.above_vwap is True:
+        r.score += 10
+        r.reasons = ["Above intraday VWAP — buyers in control"] + r.reasons[:4]
+    elif r.above_vwap is False:
+        r.score -= 10
+        r.reasons = ["Below intraday VWAP — sellers in control"] + r.reasons[:4]
+
+    if r.earnings_in_days is not None:
+        if r.earnings_in_days == 0:
+            r.score -= 10
+            r.reasons.append("⚠️ EARNINGS TODAY — extreme risk")
+        elif r.earnings_in_days == 1:
+            r.score -= 7
+            r.reasons.append("⚠️ Earnings tomorrow — high risk")
+        elif r.earnings_in_days == 2:
+            r.score -= 3
+            r.reasons.append("⚠️ Earnings in 2 days")
+
+    if r.premarket_gap_pct >= 4:
+        r.score += 8
+        r.reasons.append(f"Pre-mkt gap +{r.premarket_gap_pct:.1f}% — strong open expected")
+    elif r.premarket_gap_pct >= 2:
+        r.score += 4
+        r.reasons.append(f"Pre-mkt +{r.premarket_gap_pct:.1f}%")
+    elif r.premarket_gap_pct <= -4:
+        r.score -= 6
+        r.reasons.append(f"Pre-mkt {r.premarket_gap_pct:.1f}% — weak open")
+
+    r.score   = round(r.score, 1)
+    r.reasons = r.reasons[:5]
+
+    # Re-classify signal
+    if r.score >= 60:
+        r.signal = "STRONG BUY"
+    elif r.score >= 42:
+        r.signal = "BUY"
+    elif r.score >= 25:
+        r.signal = "WATCH"
+    elif r.score <= 0:
+        r.signal = "AVOID"
+    else:
+        r.signal = "NEUTRAL"
+
+    return r
 
 
 def _score(r: ScanResult, ind: Dict[str, Any], weights: Optional[Dict[str, float]] = None):
@@ -421,7 +482,9 @@ def run_scan(
     preferred_symbols: Optional[List[str]] = None,
 ) -> List[ScanResult]:
     """
-    Scan all symbols in parallel.
+    Two-pass scan:
+      1. Fast pass — fetch daily OHLCV + technicals for all symbols in parallel.
+      2. Slow pass — enrich top_n candidates with VWAP, news, earnings, pre-market.
     Returns top_n results sorted by score (highest first).
     weights/avoid_symbols/preferred_symbols come from StrategyManager.
     """
@@ -435,6 +498,7 @@ def run_scan(
     # Filter out avoided symbols
     scan_list = [s for s in symbols if s.upper() not in avoid]
 
+    # ── Pass 1: fast scan all symbols ────────────────────────────────────────
     results: List[ScanResult] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_scan_one, sym): sym for sym in scan_list}
@@ -446,7 +510,24 @@ def run_scan(
                 r.reasons = [f"Preferred symbol"] + r.reasons[:3]
             results.append(r)
 
-    # Sort: errors last, then by score descending
+    # Sort: errors last, then by score descending; take top_n candidates
+    results.sort(key=lambda r: (r.error is not None, -r.score))
+    top_candidates = [r for r in results[:top_n] if not r.error]
+
+    # ── Pass 2: enrich only top_n with VWAP, news, earnings, pre-market ─────
+    if top_candidates:
+        enrich_workers = min(len(top_candidates), 5)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=enrich_workers) as pool:
+            enrich_futures = {pool.submit(_enrich_result, r): r.symbol for r in top_candidates}
+            enriched: List[ScanResult] = []
+            for fut in concurrent.futures.as_completed(enrich_futures):
+                enriched.append(fut.result())
+
+        # Rebuild results list with enriched versions swapped in
+        enriched_map = {r.symbol: r for r in enriched}
+        results = [enriched_map.get(r.symbol, r) for r in results]
+
+    # Final sort after enrichment (scores may have shifted)
     results.sort(key=lambda r: (r.error is not None, -r.score))
     return results[:top_n]
 
