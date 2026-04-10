@@ -52,6 +52,77 @@ def to_yf_symbol(symbol: str) -> str:
     return s
 
 
+def fetch_news(symbol: str, max_items: int = 5) -> list:
+    """
+    Fetch recent news headlines for a symbol from Yahoo Finance.
+    Returns a list of headline strings (empty list on error).
+    """
+    try:
+        yf_sym = to_yf_symbol(symbol)
+        ticker = yf.Ticker(yf_sym)
+        raw = ticker.news or []
+        headlines = []
+        for item in raw[:max_items]:
+            title = item.get("title", "") or item.get("content", {}).get("title", "")
+            if title:
+                headlines.append(title.strip())
+        return headlines
+    except Exception:
+        return []
+
+
+def fetch_vix() -> Dict[str, Any]:
+    """
+    Fetch the current CBOE VIX level and classify the volatility regime.
+    Returns {"vix": float, "regime": str, "description": str}
+    """
+    try:
+        ticker = yf.Ticker("^VIX")
+        hist = ticker.history(period="5d", interval="1d")
+        if hist.empty:
+            return {"vix": None, "regime": "unknown", "description": "VIX unavailable"}
+        vix_val = round(float(hist["Close"].iloc[-1]), 2)
+        if vix_val >= 35:
+            regime = "extreme_fear"
+            desc   = f"VIX {vix_val} — EXTREME FEAR: do not open new positions"
+        elif vix_val >= 25:
+            regime = "elevated"
+            desc   = f"VIX {vix_val} — Elevated fear: reduce size, widen stops"
+        elif vix_val >= 18:
+            regime = "normal"
+            desc   = f"VIX {vix_val} — Normal: standard settings"
+        else:
+            regime = "complacent"
+            desc   = f"VIX {vix_val} — Low volatility: expect slower moves"
+        return {"vix": vix_val, "regime": regime, "description": desc}
+    except Exception:
+        return {"vix": None, "regime": "unknown", "description": "VIX unavailable"}
+
+
+def fetch_intraday_vwap(symbol: str) -> Dict[str, Any]:
+    """
+    Compute today's intraday VWAP using 5-minute bars.
+    Returns {"vwap": float, "current": float, "above_vwap": bool}
+    Falls back gracefully on error or when market is closed.
+    """
+    try:
+        yf_sym = to_yf_symbol(symbol)
+        ticker = yf.Ticker(yf_sym)
+        df = ticker.history(period="1d", interval="5m", auto_adjust=True)
+        if df.empty or df["Volume"].sum() == 0:
+            return {"vwap": None, "current": None, "above_vwap": None}
+        typical = (df["High"] + df["Low"] + df["Close"]) / 3
+        vwap    = float((typical * df["Volume"]).sum() / df["Volume"].sum())
+        current = float(df["Close"].iloc[-1])
+        return {
+            "vwap"      : round(vwap, 4),
+            "current"   : round(current, 4),
+            "above_vwap": current > vwap,
+        }
+    except Exception:
+        return {"vwap": None, "current": None, "above_vwap": None}
+
+
 def fetch_market_data(symbol: str, period: str = "6mo") -> Dict[str, Any]:
     """
     Fetch OHLCV history and metadata for a stock or forex symbol.

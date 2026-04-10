@@ -77,15 +77,25 @@ class PaperTrader:
         # Update balance
         self._state["balance"] = round(self._state["balance"] - cost, 2)
 
-        # Update position (average cost)
-        pos = self._state["positions"].get(symbol, {"shares": 0.0, "avg_cost": 0.0, "total_cost": 0.0})
+        # Update position (average cost); preserve entry_time from first buy
+        pos = self._state["positions"].get(symbol, {
+            "shares": 0.0, "avg_cost": 0.0, "total_cost": 0.0,
+            "entry_time": datetime.now().isoformat(timespec="seconds"),
+            "stop_loss": stop_loss, "target": target,
+            "peak_price": price, "trail_active": False, "partial_exit_done": False,
+        })
         old_cost   = pos["total_cost"]
         new_shares = pos["shares"] + shares
         new_cost   = old_cost + cost
         self._state["positions"][symbol] = {
+            **pos,
             "shares"     : round(new_shares, 6),
             "avg_cost"   : round(new_cost / new_shares, 4),
             "total_cost" : round(new_cost, 2),
+            # Update stop/target only if provided and this is a fresh entry
+            "stop_loss"  : stop_loss if stop_loss is not None else pos.get("stop_loss"),
+            "target"     : target    if target    is not None else pos.get("target"),
+            "peak_price" : max(price, pos.get("peak_price", price)),
         }
 
         trade = self._record("BUY", symbol, shares, price, cost, signal, stop_loss, target, note)
@@ -163,6 +173,29 @@ class PaperTrader:
 
     # ── Portfolio view ─────────────────────────────────────────────────────────
 
+    def update_peak(self, symbol: str, price: float):
+        """Update the peak price for a position (for trailing stop logic)."""
+        symbol = symbol.upper()
+        if symbol in self._state["positions"]:
+            pos = self._state["positions"][symbol]
+            if price > pos.get("peak_price", 0):
+                pos["peak_price"] = round(price, 4)
+                self._save()
+
+    def activate_trail(self, symbol: str):
+        """Mark the trailing stop as active for a position."""
+        symbol = symbol.upper()
+        if symbol in self._state["positions"]:
+            self._state["positions"][symbol]["trail_active"] = True
+            self._save()
+
+    def mark_partial_exit(self, symbol: str):
+        """Record that a partial exit has been done for a position."""
+        symbol = symbol.upper()
+        if symbol in self._state["positions"]:
+            self._state["positions"][symbol]["partial_exit_done"] = True
+            self._save()
+
     def get_portfolio(self, current_prices: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         """
         Returns account summary with unrealised P&L.
@@ -182,14 +215,21 @@ class PaperTrader:
             total_mkt_value += mkt_val
             total_cost      += cost
             positions.append({
-                "symbol"        : sym,
-                "shares"        : pos["shares"],
-                "avg_cost"      : pos["avg_cost"],
-                "current_price" : price,
-                "market_value"  : mkt_val,
-                "cost_basis"    : cost,
-                "unrealised_pnl": pnl,
-                "unrealised_pct": pnl_pct,
+                "symbol"            : sym,
+                "shares"            : pos["shares"],
+                "avg_cost"          : pos["avg_cost"],
+                "current_price"     : price,
+                "market_value"      : mkt_val,
+                "cost_basis"        : cost,
+                "unrealised_pnl"    : pnl,
+                "unrealised_pct"    : pnl_pct,
+                # Exit management fields
+                "stop_loss"         : pos.get("stop_loss"),
+                "target"            : pos.get("target"),
+                "peak_price"        : pos.get("peak_price", pos["avg_cost"]),
+                "trail_active"      : pos.get("trail_active", False),
+                "partial_exit_done" : pos.get("partial_exit_done", False),
+                "entry_time"        : pos.get("entry_time"),
             })
 
         # Sort by market value descending

@@ -35,7 +35,7 @@ import anthropic
 
 from scanner import run_scan, build_scan_prompt, UNIVERSE_MOMENTUM
 from paper_trader import PaperTrader
-from market_data import fetch_market_data
+from market_data import fetch_market_data, fetch_vix, fetch_news
 from strategy import get_strategy
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -131,6 +131,10 @@ class AgentLoop:
         schwab_client        : Any   = None,
         max_drawdown_pct     : float = 10.0,     # pause if equity drops this % from starting balance
         max_loss_usd         : float = 0.0,      # pause if realised losses exceed this $ (0 = off)
+        trailing_stop_pct    : float = 1.5,      # trail this % below peak once activated
+        trail_activation_pct : float = 2.5,      # activate trail once position is this % profitable
+        partial_exit_pct     : float = 0.5,      # sell this fraction at the halfway target
+        time_stop_hours      : float = 2.0,      # exit flat positions after this many hours (0 = off)
     ):
         self.api_key             = api_key
         self.pt                  = paper_trader or PaperTrader()
@@ -146,6 +150,10 @@ class AgentLoop:
         self.schwab              = schwab_client
         self.max_drawdown_pct    = max_drawdown_pct
         self.max_loss_usd        = max_loss_usd
+        self.trailing_stop_pct   = trailing_stop_pct
+        self.trail_activation_pct= trail_activation_pct
+        self.partial_exit_pct    = partial_exit_pct
+        self.time_stop_hours     = time_stop_hours
 
         self._client      = anthropic.Anthropic(api_key=api_key)
         self._stop_event  = threading.Event()
@@ -153,6 +161,7 @@ class AgentLoop:
         self._status      : str  = "idle"
         self._cycle_count : int  = 0
         self._last_cycle  : Optional[str] = None
+        self._vix_info    : Dict  = {}    # cached per cycle
         self._event_log   : List[Dict]    = []   # in-memory for UI
         self._paused_reason: Optional[str] = None
 
@@ -247,6 +256,15 @@ class AgentLoop:
 
         # ── 0. Loss-limit check — pause before doing anything ─────────────
         if self._check_loss_limits():
+            return
+
+        # ── 0b. VIX regime — fetch once per cycle ─────────────────────────
+        self._vix_info = fetch_vix()
+        vix_regime = self._vix_info.get("regime", "unknown")
+        if vix_regime == "extreme_fear":
+            log.warning("VIX extreme fear — skipping new entries, exits only")
+            self._status = f"VIX extreme fear (last: {cycle_ts})"
+            self._check_exits()
             return
 
         # ── 1. Check stop/target hits on open positions ────────────────────
@@ -367,8 +385,12 @@ class AgentLoop:
 
     def _check_exits(self):
         """
-        For each open position, fetch latest price and check
-        if stop-loss or take-profit has been hit.
+        For each open position, fetch latest price and check:
+          1. Hard stop-loss
+          2. Partial exit (sell 50% at halfway-to-target)
+          3. Trailing stop (once trail is activated)
+          4. Full take-profit
+          5. Time stop (flat position held too long)
         """
         pf = self.pt.get_portfolio()
         for pos in pf["positions"]:
@@ -383,11 +405,75 @@ class AgentLoop:
 
             pnl_pct = ((price - avg_cost) / avg_cost) * 100
 
+            # ── Update peak price (for trailing stop) ──────────────────────
+            if price > pos.get("peak_price", avg_cost):
+                self.pt.update_peak(sym, price)
+
+            # ── Activate trailing stop once profit hits activation threshold
+            if (not pos.get("trail_active")
+                    and pnl_pct >= self.trail_activation_pct
+                    and self.trailing_stop_pct > 0):
+                self.pt.activate_trail(sym)
+                log.info("Trail activated for %s at %.1f%% profit", sym, pnl_pct)
+                self._log_event("trail_activated", {"symbol": sym, "pnl_pct": pnl_pct})
+
             hit = None
+
+            # 1. Hard stop-loss (always first)
             if pnl_pct <= -self.stop_loss_pct:
-                hit = f"STOP-LOSS hit ({pnl_pct:+.1f}%)"
+                hit = f"STOP-LOSS ({pnl_pct:+.1f}%)"
+
+            # 2. Trailing stop (only when active)
+            elif pos.get("trail_active"):
+                peak       = pos.get("peak_price", avg_cost)
+                trail_stop = peak * (1 - self.trailing_stop_pct / 100)
+                if price <= trail_stop:
+                    hit = (
+                        f"TRAIL STOP @ ${trail_stop:.2f} "
+                        f"(peak ${peak:.2f}, -{self.trailing_stop_pct}%)"
+                    )
+
+            # 3. Full take-profit
             elif pnl_pct >= self.take_profit_pct:
-                hit = f"TAKE-PROFIT hit ({pnl_pct:+.1f}%)"
+                hit = f"TAKE-PROFIT ({pnl_pct:+.1f}%)"
+
+            # 4. Partial exit — sell half when halfway to target
+            elif (self.partial_exit_pct > 0
+                    and not pos.get("partial_exit_done")
+                    and pnl_pct >= self.take_profit_pct * 0.5):
+                partial_shares = round(shares * self.partial_exit_pct, 6)
+                if partial_shares >= 1:
+                    log.info("Partial exit: %s — selling %.0f shares at +%.1f%%",
+                             sym, partial_shares, pnl_pct)
+                    try:
+                        trade = self._execute_sell(
+                            sym, partial_shares, price,
+                            note=f"Partial exit ({int(self.partial_exit_pct*100)}%) at {pnl_pct:+.1f}%"
+                        )
+                        self.pt.mark_partial_exit(sym)
+                        self.pt.activate_trail(sym)  # trail the remaining half
+                        self._log_event("partial_exit", {
+                            "symbol": sym, "shares_sold": partial_shares,
+                            "price": price, "pnl_pct": pnl_pct,
+                            "pnl": trade.get("realised_pnl", 0),
+                        })
+                    except Exception as exc:
+                        log.error("Partial exit failed for %s: %s", sym, exc)
+                continue  # don't check time-stop after partial
+
+            # 5. Time stop — exit flat positions holding too long
+            if not hit and self.time_stop_hours > 0 and pos.get("entry_time"):
+                try:
+                    entry_dt  = datetime.fromisoformat(pos["entry_time"])
+                    held_hours= (datetime.now() - entry_dt).total_seconds() / 3600
+                    flat      = abs(pnl_pct) < 1.0   # less than 1% move = "flat"
+                    if held_hours >= self.time_stop_hours and flat:
+                        hit = (
+                            f"TIME STOP — held {held_hours:.1f}h, "
+                            f"flat at {pnl_pct:+.1f}% — capital redeployed"
+                        )
+                except Exception:
+                    pass
 
             if hit:
                 log.info("Exit: %s — %s at $%.2f", sym, hit, price)
@@ -416,8 +502,16 @@ class AgentLoop:
                 log.info("Already holding %s — skipping", sym)
                 return
 
+            # VIX regime sizing adjustment
+            vix_regime  = self._vix_info.get("regime", "normal")
+            size_scale  = {"extreme_fear": 0.0, "elevated": 0.7, "normal": 1.0, "complacent": 1.0}.get(vix_regime, 1.0)
+            effective_pct = min(dec.get("size_pct", 5.0), self.max_position_pct) * size_scale
+            if effective_pct <= 0:
+                log.info("VIX extreme — skipping new entry for %s", sym)
+                return
+
             # Size position
-            alloc    = equity * (min(dec.get("size_pct", 5.0), self.max_position_pct) / 100)
+            alloc    = equity * (effective_pct / 100)
             alloc    = min(alloc, cash * 0.95)  # never use all cash
             if alloc < 10:
                 log.info("Insufficient cash to buy %s", sym)
@@ -522,11 +616,18 @@ class AgentLoop:
             f"open positions={open_count}/{self.max_open_positions}, "
             f"holdings={','.join(existing) or 'none'}"
         )
+
+        # VIX context
+        vix_desc = self._vix_info.get("description", "")
+        vix_line = f"\nMarket regime: {vix_desc}" if vix_desc else ""
+
         scan_section = build_scan_prompt(scan_results)
         return (
-            f"{pf_line}\n\n"
-            f"Stop-loss rule: {self.stop_loss_pct}%  |  "
-            f"Take-profit rule: {self.take_profit_pct}%\n\n"
+            f"{pf_line}{vix_line}\n\n"
+            f"Stop-loss: {self.stop_loss_pct}%  |  "
+            f"Take-profit: {self.take_profit_pct}%  |  "
+            f"Trail activates at: +{self.trail_activation_pct}%  |  "
+            f"Time stop: {self.time_stop_hours}h\n\n"
             f"{scan_section}\n\n"
             "Provide your trade decisions now (one line per ticker):"
         )

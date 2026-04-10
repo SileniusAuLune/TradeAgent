@@ -10,7 +10,7 @@ import concurrent.futures
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 
-from market_data import fetch_market_data
+from market_data import fetch_market_data, fetch_news, fetch_intraday_vwap
 from technical import calculate_indicators
 
 
@@ -147,8 +147,11 @@ class ScanResult:
     bb_squeeze      : bool
     atr_pct         : float
     market_structure: str
-    gap_pct         : float = 0.0   # today's open vs prior close (+ = gap up)
-    rs_vs_spy       : float = 0.0   # relative strength: ticker 5d - SPY 5d %
+    gap_pct         : float = 0.0    # today's open vs prior close (+ = gap up)
+    rs_vs_spy       : float = 0.0    # relative strength: ticker 5d - SPY 5d %
+    vwap            : Optional[float] = None   # intraday VWAP price
+    above_vwap      : Optional[bool]  = None   # price above/below intraday VWAP
+    news            : List[str] = field(default_factory=list)  # recent headlines
     score           : float = 0.0
     signal          : str   = "NEUTRAL"
     reasons         : List[str] = field(default_factory=list)
@@ -199,6 +202,14 @@ def _scan_one(symbol: str) -> ScanResult:
         tick_5d   = ind.get("perf_5d") or 0.0
         rs_vs_spy = round(float(tick_5d) - spy_perf, 2)
 
+        # Intraday VWAP (5-min bars) — key level for day trading
+        vwap_data   = fetch_intraday_vwap(symbol)
+        vwap_price  = vwap_data.get("vwap")
+        above_vwap  = vwap_data.get("above_vwap")
+
+        # Recent news headlines — catalyst awareness
+        news = fetch_news(symbol, max_items=3)
+
         result = ScanResult(
             symbol          = symbol,
             price           = md["current_price"],
@@ -214,6 +225,9 @@ def _scan_one(symbol: str) -> ScanResult:
             market_structure= ind.get("market_structure", "N/A"),
             gap_pct         = gap_pct,
             rs_vs_spy       = rs_vs_spy,
+            vwap            = vwap_price,
+            above_vwap      = above_vwap,
+            news            = news,
         )
 
         result.score, result.signal, result.reasons = _score(result, ind, _current_weights)
@@ -320,6 +334,13 @@ def _score(r: ScanResult, ind: Dict[str, Any], weights: Optional[Dict[str, float
     if ind.get("macd_crossover"):
         score += 4 * wt("macd"); reasons.append("MACD crossover — fresh signal")
 
+    # ── VWAP position (−10 to +10 pts) — key intraday level ─────────────
+    # Above VWAP = buyers in control; below = sellers control intraday
+    if r.above_vwap is True:
+        score += 10; reasons.append("Above intraday VWAP — buyers in control")
+    elif r.above_vwap is False:
+        score -= 10; reasons.append("Below intraday VWAP — sellers in control")
+
     # ── Relative strength vs SPY (0–10 pts) — outpacing the market ───────
     if r.rs_vs_spy >= 5:
         score += 10; reasons.append(f"RS vs SPY: +{r.rs_vs_spy:.1f}% — outperforming hard")
@@ -408,10 +429,19 @@ def build_scan_prompt(results: List[ScanResult]) -> str:
         if r.error:
             continue
         reasons_str = " · ".join(r.reasons) if r.reasons else "no strong signal"
+        vwap_str = ""
+        if r.vwap is not None:
+            vwap_str = f"  VWAP={'above' if r.above_vwap else 'BELOW'}"
+        news_str = ""
+        if r.news:
+            news_str = f"\n      News: {r.news[0][:80]}"
+            if len(r.news) > 1:
+                news_str += f" | {r.news[1][:60]}"
         lines.append(
             f"  {r.symbol:6s}  score={r.score:5.1f}  {r.signal:10s}  "
             f"${r.price:,.2f}  {r.pct_change:+.1f}%  RSI={r.rsi:.0f}  "
-            f"Vol={r.volume_ratio:.1f}x  ADX={r.adx:.0f}  |  {reasons_str}"
+            f"Vol={r.volume_ratio:.1f}x  ADX={r.adx:.0f}{vwap_str}  |  {reasons_str}"
+            + news_str
         )
     lines.append(
         "\nRespond with a numbered ranked list. For each entry:\n"

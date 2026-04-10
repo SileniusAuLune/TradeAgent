@@ -862,13 +862,17 @@ with tab_loop:
                 f"Cycles completed: {loop._cycle_count}",
                 icon="🌙"
             )
+        elif "VIX extreme" in status:
+            st.error(f"⚠️ {status} — new entries paused, managing exits only", icon="⚠️")
         elif "scanning" in status or "thinking" in status:
             st.warning(f"⚡ {status}", icon="⚡")
         else:
+            vix_info = getattr(loop, "_vix_info", {})
+            vix_str  = f"  |  VIX {vix_info['vix']}" if vix_info.get("vix") else ""
             st.success(
                 f"Running  |  Cycles: {loop._cycle_count}  |  "
                 f"Last scan: {loop._last_cycle or 'pending...'}  |  "
-                f"Next in ~{loop.interval}s",
+                f"Next in ~{loop.interval}s{vix_str}",
                 icon="🟢"
             )
     elif loop and not loop.is_running:
@@ -949,6 +953,21 @@ with tab_loop:
             min_value=0.0, value=500.0, step=50.0, format="%.0f", key="cfg_max_loss",
         )
 
+        st.markdown("**Exit rules**")
+        exit_c1, exit_c2 = st.columns(2)
+        cfg_trail_act   = exit_c1.slider("Activate trailing stop at profit (%)", 1, 10, 3,
+                                         key="cfg_trail_act",
+                                         help="Once position is this % up, switch to trailing stop")
+        cfg_trail_pct   = exit_c1.slider("Trailing stop distance (%)", 1, 8, 2,
+                                         key="cfg_trail_pct",
+                                         help="Trail this % below the position's peak price")
+        cfg_time_stop   = exit_c2.slider("Time stop — exit flat trades after (hours)", 0, 8, 2,
+                                         key="cfg_time_stop",
+                                         help="Exit if position <1% move after N hours. 0 = off")
+        cfg_partial_exit= exit_c2.checkbox("Partial exit — sell 50% at halfway to target",
+                                           value=True, key="cfg_partial_exit",
+                                           help="Lock in 50% gains at half the take-profit target, trail the rest")
+
         _universe_opts = ["Top Daily Movers (auto)"] + list(UNIVERSES.keys())
         cfg_universe    = st.selectbox(
             "Scan universe",
@@ -1022,19 +1041,23 @@ with tab_loop:
             else:
                 symbols = UNIVERSES[cfg_universe]
             new_loop = AgentLoop(
-                api_key             = _api_key(),
-                paper_trader        = st.session_state["paper_trader"],
-                symbols             = symbols,
-                interval            = cfg_interval,
-                min_score_threshold = cfg_min_score,
-                max_open_positions  = cfg_max_pos,
-                max_position_pct    = cfg_size_pct,
-                stop_loss_pct       = cfg_stop,
-                take_profit_pct     = cfg_target,
-                max_drawdown_pct    = cfg_max_dd,
-                max_loss_usd        = cfg_max_loss,
-                live_mode           = _is_live(),
-                schwab_client       = _schwab(),
+                api_key              = _api_key(),
+                paper_trader         = st.session_state["paper_trader"],
+                symbols              = symbols,
+                interval             = cfg_interval,
+                min_score_threshold  = cfg_min_score,
+                max_open_positions   = cfg_max_pos,
+                max_position_pct     = cfg_size_pct,
+                stop_loss_pct        = cfg_stop,
+                take_profit_pct      = cfg_target,
+                max_drawdown_pct     = cfg_max_dd,
+                max_loss_usd         = cfg_max_loss,
+                trailing_stop_pct    = cfg_trail_pct,
+                trail_activation_pct = cfg_trail_act,
+                partial_exit_pct     = 0.5 if cfg_partial_exit else 0.0,
+                time_stop_hours      = float(cfg_time_stop),
+                live_mode            = _is_live(),
+                schwab_client        = _schwab(),
             )
             new_loop.start()
             st.session_state["agent_loop"] = new_loop
@@ -1106,6 +1129,17 @@ with tab_loop:
                     pnl    = evt.get("pnl", 0)
                     color  = "🟢" if pnl >= 0 else "🔴"
                     st.markdown(f"`{ts}` {color} **EXIT {sym}** — {reason}  |  P&L: **${pnl:+,.2f}**")
+
+                elif evt_type == "partial_exit":
+                    sym   = evt.get("symbol", "")
+                    pnl   = evt.get("pnl", 0)
+                    pct   = evt.get("pnl_pct", 0)
+                    st.markdown(f"`{ts}` 🟡 **PARTIAL EXIT {sym}** @ +{pct:.1f}%  |  Locked: **${pnl:+,.2f}**  — trailing rest")
+
+                elif evt_type == "trail_activated":
+                    sym = evt.get("symbol", "")
+                    pct = evt.get("pnl_pct", 0)
+                    st.markdown(f"`{ts}` 🔒 **Trail active {sym}** — locked in at +{pct:.1f}%")
 
                 elif evt_type == "error":
                     st.markdown(f"`{ts}` ⚠️ Error — {evt.get('message','')}")
