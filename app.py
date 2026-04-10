@@ -928,12 +928,17 @@ with tab_loop:
         cfg_c1, cfg_c2 = st.columns(2)
 
         cfg_interval    = cfg_c1.slider("Scan interval (seconds)", 60, 1800, 300, step=60, key="cfg_interval")
-        cfg_min_score   = cfg_c1.slider("Min scanner score to trade", 20, 80, 45, key="cfg_min_score")
-        cfg_max_pos     = cfg_c1.slider("Max open positions",         1, 15,  5,  key="cfg_max_pos")
-        cfg_size_pct    = cfg_c1.slider("Max % equity per trade",     2, 20,  8,  key="cfg_size_pct")
+        cfg_min_score   = cfg_c1.slider("Min scanner score to trade", 20, 80, 60, key="cfg_min_score",
+                                        help="60+ = only high-conviction setups enter")
+        cfg_max_pos     = cfg_c1.slider("Max open positions",         1, 10,  3,  key="cfg_max_pos",
+                                        help="3 focused fast-money positions")
+        cfg_size_pct    = cfg_c1.slider("Max % equity per trade",     2, 25, 15,  key="cfg_size_pct",
+                                        help="15% per trade — size up on conviction")
 
-        cfg_stop        = cfg_c2.slider("Stop-loss (%)",              1, 15,  3,  key="cfg_stop")
-        cfg_target      = cfg_c2.slider("Take-profit (%)",            2, 30,  8,  key="cfg_target")
+        cfg_stop        = cfg_c2.slider("Stop-loss (%)",              1, 10,  2,  key="cfg_stop",
+                                        help="Tight 2% stop — cut losers fast, redeploy")
+        cfg_target      = cfg_c2.slider("Take-profit (%)",            2, 20,  5,  key="cfg_target",
+                                        help="5% in a session is a win — take it")
         cfg_max_dd      = cfg_c2.slider(
             "Pause if drawdown exceeds (%)",
             1, 50, 10, key="cfg_max_dd",

@@ -240,91 +240,108 @@ def _score(r: ScanResult, ind: Dict[str, Any], weights: Optional[Dict[str, float
     score   = 0.0
     reasons = []
 
-    # ── Trend alignment (0–25 pts) ─────────────────────────────────────────
-    if "Strong Up" in r.trend:
-        score += 25 * wt("trend"); reasons.append("Strong uptrend")
-    elif "Up" in r.trend:
-        score += 15 * wt("trend"); reasons.append("Uptrend")
-    elif "Strong Down" in r.trend:
-        score -= 10; reasons.append("Strong downtrend (short candidate)")
-    elif "Down" in r.trend:
-        score -= 5
+    # ── Hard filter: skip low-ATR (boring) stocks ─────────────────────────
+    # ATR < 1% means the stock rarely moves enough for fast money.
+    # Return a near-zero score immediately so it never surfaces.
+    if r.atr_pct < 1.0:
+        return -5.0, "AVOID", [f"ATR {r.atr_pct:.1f}% — stock too slow for fast money"]
 
-    # ── ADX strength (0–15 pts) ────────────────────────────────────────────
-    if r.adx >= 30:
-        score += 15 * wt("adx"); reasons.append(f"ADX {r.adx:.0f} — strong trend")
-    elif r.adx >= 20:
-        score += 8  * wt("adx"); reasons.append(f"ADX {r.adx:.0f} — trending")
-
-    # ── RSI momentum zone (0–15 pts) ──────────────────────────────────────
-    if 55 <= r.rsi <= 70:
-        score += 15 * wt("rsi"); reasons.append(f"RSI {r.rsi:.0f} — bullish momentum zone")
-    elif 50 <= r.rsi < 55:
-        score += 8  * wt("rsi")
-    elif r.rsi > 70:
-        score += 5  * wt("rsi"); reasons.append(f"RSI {r.rsi:.0f} — overbought (momentum)")
-    elif r.rsi < 30:
-        score += 10 * wt("rsi"); reasons.append(f"RSI {r.rsi:.0f} — oversold bounce candidate")
-    elif r.rsi < 40:
-        score += 5  * wt("rsi")
-
-    # ── MACD (0–10 pts) ───────────────────────────────────────────────────
-    if r.macd_bullish:
-        score += 10 * wt("macd"); reasons.append("MACD bullish")
-    if ind.get("macd_crossover"):
-        score += 5  * wt("macd"); reasons.append("MACD crossover — fresh signal")
-
-    # ── Volume (−10 to +15 pts) ───────────────────────────────────────────
-    # Low volume = weak conviction; penalise it so thin setups don't score high
-    if r.volume_ratio >= 2.5:
-        score += 15 * wt("volume"); reasons.append(f"{r.volume_ratio:.1f}x avg volume — strong interest")
-    elif r.volume_ratio >= 1.5:
-        score += 8  * wt("volume"); reasons.append(f"{r.volume_ratio:.1f}x avg volume")
-    elif r.volume_ratio < 0.5:
-        score -= 10; reasons.append(f"{r.volume_ratio:.1f}x avg volume — very thin, avoid")
+    # ── Volume surge — #1 signal for intraday fast money ─────────────────
+    # No volume = no move. Hard penalise below-average volume.
+    # Weight multiplier from strategy amplifies this further.
+    if r.volume_ratio >= 3.0:
+        score += 25 * wt("volume"); reasons.append(f"{r.volume_ratio:.1f}x avg volume — SURGE")
+    elif r.volume_ratio >= 2.0:
+        score += 18 * wt("volume"); reasons.append(f"{r.volume_ratio:.1f}x avg volume — strong")
+    elif r.volume_ratio >= 1.3:
+        score += 10 * wt("volume"); reasons.append(f"{r.volume_ratio:.1f}x avg volume")
     elif r.volume_ratio < 0.8:
-        score -= 5;  reasons.append(f"{r.volume_ratio:.1f}x avg volume — below average")
+        score -= 15; reasons.append(f"{r.volume_ratio:.1f}x volume — thin, skip")
+    elif r.volume_ratio < 1.0:
+        score -= 8
 
-    # ── BB squeeze breakout (0–10 pts) ────────────────────────────────────
-    if r.bb_squeeze:
-        score += 10 * wt("bb_squeeze"); reasons.append("Bollinger Band squeeze — breakout pending")
-
-    # ── Market structure (0–10 pts) ───────────────────────────────────────
-    if r.market_structure == "Higher Highs / Higher Lows (Bullish)":
-        score += 10 * wt("market_structure"); reasons.append("HH/HL structure")
-    elif r.market_structure == "Lower Highs / Lower Lows (Bearish)":
-        score -= 5
-
-    # ── Day % change (0–5 pts) ────────────────────────────────────────────
-    if r.pct_change >= 3:
-        score += 5;  reasons.append(f"+{r.pct_change:.1f}% today — momentum")
-    elif r.pct_change <= -5:
-        score += 3;  reasons.append(f"{r.pct_change:.1f}% — oversold flush")
-
-    # ── Weekly higher-TF confirmation ─────────────────────────────────────
-    if ind.get("weekly_trend") and "Up" in str(ind.get("weekly_trend", "")):
-        score += 5 * wt("weekly_trend");  reasons.append("Weekly uptrend confirmation")
-
-    # ── Gap-up detection (0–12 pts) — strong short-term signal ───────────
-    if r.gap_pct >= 3:
-        score += 12; reasons.append(f"+{r.gap_pct:.1f}% gap up — strong catalyst")
+    # ── Gap-up detection (0–20 pts) — #2 signal ───────────────────────────
+    # A gap up on open = overnight catalyst; strongest intraday setup.
+    if r.gap_pct >= 5:
+        score += 20; reasons.append(f"+{r.gap_pct:.1f}% gap up — strong catalyst")
+    elif r.gap_pct >= 3:
+        score += 15; reasons.append(f"+{r.gap_pct:.1f}% gap up — catalyst")
     elif r.gap_pct >= 1:
-        score += 6;  reasons.append(f"+{r.gap_pct:.1f}% gap up")
-    elif r.gap_pct <= -3:
-        score -= 8;  reasons.append(f"{r.gap_pct:.1f}% gap down — avoid")
+        score += 8;  reasons.append(f"+{r.gap_pct:.1f}% gap up")
+    elif r.gap_pct <= -4:
+        score -= 12; reasons.append(f"{r.gap_pct:.1f}% gap down — avoid")
 
-    # ── Relative strength vs SPY (0–10 pts) — leader, not laggard ────────
+    # ── Day % change (0–15 pts) — already moving = momentum ──────────────
+    if r.pct_change >= 5:
+        score += 15; reasons.append(f"+{r.pct_change:.1f}% today — momentum MOVE")
+    elif r.pct_change >= 3:
+        score += 10; reasons.append(f"+{r.pct_change:.1f}% today — moving")
+    elif r.pct_change >= 1.5:
+        score += 5;  reasons.append(f"+{r.pct_change:.1f}% today")
+    elif r.pct_change <= -6:
+        score += 5;  reasons.append(f"{r.pct_change:.1f}% — oversold flush candidate")
+
+    # ── RSI momentum zone (0–12 pts) ──────────────────────────────────────
+    if 55 <= r.rsi <= 72:
+        score += 12 * wt("rsi"); reasons.append(f"RSI {r.rsi:.0f} — hot momentum zone")
+    elif 50 <= r.rsi < 55:
+        score += 6  * wt("rsi")
+    elif r.rsi > 72:
+        score += 4  * wt("rsi"); reasons.append(f"RSI {r.rsi:.0f} — extended but running")
+    elif r.rsi < 28:
+        score += 8  * wt("rsi"); reasons.append(f"RSI {r.rsi:.0f} — oversold snap")
+    elif r.rsi < 40:
+        score += 3  * wt("rsi")
+
+    # ── BB squeeze breakout (0–15 pts) ────────────────────────────────────
+    # Squeeze breaking out on volume = explosive fast move
+    if r.bb_squeeze:
+        score += 15 * wt("bb_squeeze"); reasons.append("BB squeeze — breakout loading")
+
+    # ── Trend alignment (0–12 pts) ────────────────────────────────────────
+    if "Strong Up" in r.trend:
+        score += 12 * wt("trend"); reasons.append("Strong uptrend")
+    elif "Up" in r.trend:
+        score += 7  * wt("trend"); reasons.append("Uptrend")
+    elif "Strong Down" in r.trend:
+        score -= 8;  reasons.append("Downtrend — avoid long")
+    elif "Down" in r.trend:
+        score -= 4
+
+    # ── ADX (0–10 pts) ────────────────────────────────────────────────────
+    if r.adx >= 30:
+        score += 10 * wt("adx"); reasons.append(f"ADX {r.adx:.0f} — strong directional move")
+    elif r.adx >= 20:
+        score += 5  * wt("adx")
+
+    # ── MACD (0–8 pts) ────────────────────────────────────────────────────
+    if r.macd_bullish:
+        score += 8 * wt("macd"); reasons.append("MACD bullish")
+    if ind.get("macd_crossover"):
+        score += 4 * wt("macd"); reasons.append("MACD crossover — fresh signal")
+
+    # ── Relative strength vs SPY (0–10 pts) — outpacing the market ───────
     if r.rs_vs_spy >= 5:
-        score += 10; reasons.append(f"RS vs SPY: +{r.rs_vs_spy:.1f}% — sector leader")
+        score += 10; reasons.append(f"RS vs SPY: +{r.rs_vs_spy:.1f}% — outperforming hard")
     elif r.rs_vs_spy >= 2:
         score += 5;  reasons.append(f"RS vs SPY: +{r.rs_vs_spy:.1f}%")
     elif r.rs_vs_spy <= -5:
-        score -= 5;  reasons.append(f"RS vs SPY: {r.rs_vs_spy:.1f}% — underperformer")
+        score -= 5;  reasons.append(f"RS vs SPY: {r.rs_vs_spy:.1f}% — laggard")
+
+    # ── Market structure (0–8 pts) ────────────────────────────────────────
+    if r.market_structure == "Higher Highs / Higher Lows (Bullish)":
+        score += 8 * wt("market_structure"); reasons.append("HH/HL structure")
+    elif r.market_structure == "Lower Highs / Lower Lows (Bearish)":
+        score -= 5
+
+    # ── Weekly trend (minimal weight for intraday) ─────────────────────────
+    if ind.get("weekly_trend") and "Up" in str(ind.get("weekly_trend", "")):
+        score += 3 * wt("weekly_trend")
 
     # ── Signal label ──────────────────────────────────────────────────────
-    if score >= 65:
+    if score >= 60:
         signal = "STRONG BUY"
-    elif score >= 45:
+    elif score >= 42:
         signal = "BUY"
     elif score >= 25:
         signal = "WATCH"

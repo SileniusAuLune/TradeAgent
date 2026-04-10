@@ -18,34 +18,39 @@ from typing import Any, Dict, List, Optional
 
 STRATEGY_FILE = Path("strategy.json")
 
+# Bump this whenever DEFAULT_STRATEGY changes significantly.
+# Any saved file with a lower version is auto-reset to the new defaults.
+CURRENT_VERSION = 2
+
 # ── Defaults ───────────────────────────────────────────────────────────────────
 DEFAULT_STRATEGY: Dict[str, Any] = {
     # Metadata
-    "version"          : 1,
+    "version"          : CURRENT_VERSION,
     "created"          : date.today().isoformat(),
     "last_updated"     : date.today().isoformat(),
     "update_count"     : 0,
 
-    # ── Short-term momentum defaults ──────────────────────────────────────
-    # Goal: capture 6-12% moves in 2-7 days, cut losers fast at 2.5%,
-    # redeploy capital into the next strong setup immediately.
-    "min_score_threshold" : 52.0,   # only the cleanest setups
-    "stop_loss_pct"       : 2.5,    # tight — protect capital, redeploy fast
-    "take_profit_pct"     : 10.0,   # aim for 4:1 R:R on strong moves
-    "max_position_pct"    : 10.0,   # concentrate into winners
-    "max_open_positions"  : 4,      # fewer, higher-conviction positions
+    # ── Fast-money intraday / 1-2 day momentum defaults ───────────────────
+    # Goal: catch 3-8% moves in the SAME session or next day.
+    # Get in on volume/gap/breakout, take profits fast, move on.
+    # Never hold a loser overnight hoping — cut at 1.5% and redeploy.
+    "min_score_threshold" : 60.0,   # only very high conviction setups enter
+    "stop_loss_pct"       : 1.5,    # tight — capital protection above all
+    "take_profit_pct"     : 5.0,    # take money fast; 5% in a day is great
+    "max_position_pct"    : 15.0,   # size up — fewer, bigger, faster
+    "max_open_positions"  : 3,      # 3 focused positions max at once
 
-    # Scanner weight multipliers — volume and momentum weighted higher
-    # for short-term because price follows unusual activity
+    # Scanner weights tuned for INTRADAY momentum:
+    # volume surge + gap = the signal; weekly trend = irrelevant
     "scanner_weights": {
-        "trend"           : 1.0,
-        "adx"             : 1.2,    # strong trend = more reliable
+        "trend"           : 0.8,    # trend helps but we care more about NOW
+        "adx"             : 0.9,
         "rsi"             : 1.0,
-        "macd"            : 1.0,
-        "volume"          : 1.5,    # volume surge is the strongest ST signal
-        "bb_squeeze"      : 1.3,    # squeeze + breakout = explosive move
-        "market_structure": 1.0,
-        "weekly_trend"    : 0.8,    # weekly matters less for 2-7 day holds
+        "macd"            : 0.9,
+        "volume"          : 2.5,    # volume surge is #1 — follow the money
+        "bb_squeeze"      : 1.5,    # squeeze into volume = explosive move
+        "market_structure": 0.7,
+        "weekly_trend"    : 0.2,    # irrelevant for same-day trades
     },
 
     # Universe filters
@@ -53,12 +58,14 @@ DEFAULT_STRATEGY: Dict[str, Any] = {
     "preferred_symbols"  : [],
     "avoid_sectors"      : [],
 
-    # Prompt additions — short-term focus baked in from day one
+    # Claude is briefed as an intraday momentum trader
     "prompt_additions"   : (
-        "This is a SHORT-TERM momentum strategy targeting 2-7 day swing trades. "
-        "Prioritize: high relative volume (2x+), ADX above 25, clean trend structure. "
-        "Cut losers fast at stop — do not hold through weakness hoping for recovery. "
-        "Take partial profits at Target 1 and trail the rest."
+        "FAST MONEY strategy: target 3-8% gains in the SAME session or next day. "
+        "ONLY trade on: (1) volume surge 2x+ above average, (2) gap-up catalyst, "
+        "or (3) breakout on high volume. "
+        "Do NOT trade setups with volume below average — no volume = no move. "
+        "Enter only if price is actively moving. Exit same day or next open. "
+        "Stop at 1.5% — never hold a loser. Redeploy capital into the next setup immediately."
     ),
 
     # Change history
@@ -87,6 +94,16 @@ class StrategyManager:
             try:
                 with open(self._path) as f:
                     data = json.load(f)
+                # Auto-reset if the saved file is from an older strategy version
+                if int(data.get("version", 0)) < CURRENT_VERSION:
+                    import logging
+                    logging.getLogger("strategy").info(
+                        "strategy.json version %s < %s — resetting to fast-money defaults",
+                        data.get("version", 0), CURRENT_VERSION,
+                    )
+                    fresh = deepcopy(DEFAULT_STRATEGY)
+                    self._path.write_text(json.dumps(fresh, indent=2))
+                    return fresh
                 # Back-fill any missing keys from defaults
                 merged = deepcopy(DEFAULT_STRATEGY)
                 merged.update(data)
