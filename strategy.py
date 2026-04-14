@@ -16,11 +16,18 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    import db as _db
+    _db.init_db()
+    _DB_AVAILABLE = True
+except Exception:
+    _DB_AVAILABLE = False
+
 STRATEGY_FILE = Path("strategy.json")
 
 # Bump this whenever DEFAULT_STRATEGY changes significantly.
 # Any saved file with a lower version is auto-reset to the new defaults.
-CURRENT_VERSION = 2
+CURRENT_VERSION = 3
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 DEFAULT_STRATEGY: Dict[str, Any] = {
@@ -57,6 +64,19 @@ DEFAULT_STRATEGY: Dict[str, Any] = {
     "avoid_symbols"      : [],
     "preferred_symbols"  : [],
     "avoid_sectors"      : [],
+
+    # ── Insider (Form 4) signal integration ──────────────────────────────
+    # insider_weight: multiplier applied to the raw insider score boost
+    #   1.0 = use boost as-is (up to +20 pts)
+    #   2.0 = double the insider boost — treat it as a primary signal
+    #   0.0 = ignore insider data entirely
+    # insider_min_score: minimum Itradedash signal score to apply ANY boost
+    #   e.g. 50 means ignore weak/noise signals; 35 catches more but adds noise
+    # insider_preferred_refresh: True = auto-populate preferred_symbols from
+    #   top insider signals each trade cycle (hunts what insiders are buying)
+    "insider_weight"             : 1.5,   # insiders are meaningful but secondary to momentum
+    "insider_min_score"          : 45,    # filter out low-conviction Form 4 filings
+    "insider_preferred_refresh"  : True,  # auto-update watchlist from top insider signals
 
     # Claude is briefed as an intraday momentum trader
     "prompt_additions"   : (
@@ -135,11 +155,23 @@ class StrategyManager:
         """Return kwargs ready to unpack into AgentLoop.__init__."""
         s = self._strategy
         return {
-            "min_score_threshold" : s["min_score_threshold"],
-            "stop_loss_pct"       : s["stop_loss_pct"],
-            "take_profit_pct"     : s["take_profit_pct"],
-            "max_position_pct"    : s["max_position_pct"],
-            "max_open_positions"  : s["max_open_positions"],
+            "min_score_threshold"       : s["min_score_threshold"],
+            "stop_loss_pct"             : s["stop_loss_pct"],
+            "take_profit_pct"           : s["take_profit_pct"],
+            "max_position_pct"          : s["max_position_pct"],
+            "max_open_positions"        : s["max_open_positions"],
+            "insider_weight"            : s.get("insider_weight", 1.5),
+            "insider_min_score"         : s.get("insider_min_score", 45),
+            "insider_preferred_refresh" : s.get("insider_preferred_refresh", True),
+        }
+
+    def insider_params(self) -> Dict[str, Any]:
+        """Return the insider signal tuning params."""
+        s = self._strategy
+        return {
+            "weight"            : s.get("insider_weight", 1.5),
+            "min_score"         : s.get("insider_min_score", 45),
+            "preferred_refresh" : s.get("insider_preferred_refresh", True),
         }
 
     def scanner_weights(self) -> Dict[str, float]:
@@ -167,8 +199,10 @@ class StrategyManager:
         NUMERIC_KEYS = {
             "min_score_threshold", "stop_loss_pct", "take_profit_pct",
             "max_position_pct", "max_open_positions",
+            "insider_weight", "insider_min_score",
         }
         LIST_KEYS = {"avoid_symbols", "preferred_symbols", "avoid_sectors"}
+        BOOL_KEYS = {"insider_preferred_refresh"}
 
         for key, new_val in updates.items():
             if new_val is None:
@@ -187,6 +221,12 @@ class StrategyManager:
                         s["scanner_weights"][wk] = float(wv)
                         if s["scanner_weights"][wk] != old:
                             changed[f"scanner_weights.{wk}"] = {"from": old, "to": float(wv)}
+
+            elif key in BOOL_KEYS:
+                old = s.get(key)
+                s[key] = bool(new_val)
+                if s[key] != old:
+                    changed[key] = {"from": old, "to": s[key]}
 
             elif key in LIST_KEYS and isinstance(new_val, list):
                 old = s[key][:]
@@ -218,6 +258,18 @@ class StrategyManager:
             s["last_updated"]  = date.today().isoformat()
             s["update_count"] += 1
             self.save()
+
+            # Snapshot to SQLite for cross-session strategy analysis
+            if _DB_AVAILABLE:
+                try:
+                    _db.insert_strategy_snapshot(
+                        params=deepcopy(s),
+                        changes=changed,
+                        source=source,
+                        rationale=updates.get("rationale", ""),
+                    )
+                except Exception:
+                    pass
 
         return changed
 

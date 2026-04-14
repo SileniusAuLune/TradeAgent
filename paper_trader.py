@@ -3,6 +3,7 @@ Paper trading engine — simulated trades backed by a JSON file.
 Tracks balance, positions, and full trade history with P&L.
 
 State is persisted to paper_trades.json so it survives restarts.
+Every trade is also written to SQLite (trades.db) for historical analysis.
 """
 
 import json
@@ -10,6 +11,13 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
+
+try:
+    import db as _db
+    _db.init_db()
+    _DB_AVAILABLE = True
+except Exception:
+    _DB_AVAILABLE = False
 
 STATE_FILE = Path("paper_trades.json")
 DEFAULT_BALANCE = 10_000.0
@@ -61,6 +69,8 @@ class PaperTrader:
         stop_loss: Optional[float] = None,
         target: Optional[float] = None,
         note: Optional[str] = None,
+        insider_score: Optional[float] = None,
+        insider_cluster: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Buy `shares` of `symbol` at `price`.
@@ -98,7 +108,8 @@ class PaperTrader:
             "peak_price" : max(price, pos.get("peak_price", price)),
         }
 
-        trade = self._record("BUY", symbol, shares, price, cost, signal, stop_loss, target, note)
+        trade = self._record("BUY", symbol, shares, price, cost, signal, stop_loss, target, note,
+                             insider_score=insider_score, insider_cluster=insider_cluster)
         self._save()
         return trade
 
@@ -151,6 +162,7 @@ class PaperTrader:
         self, action, symbol, shares, price, amount,
         signal, stop_loss, target, note,
         realised_pnl=None, realised_pct=None, entry_time=None,
+        insider_score=None, insider_cluster=None,
     ) -> Dict[str, Any]:
         trade: Dict[str, Any] = {
             "id"        : len(self._state["history"]) + 1,
@@ -167,11 +179,20 @@ class PaperTrader:
         if target:      trade["target"]      = target
         if note:        trade["note"]        = note
         if entry_time:  trade["entry_time"]  = entry_time
+        if insider_score is not None:
+            trade["insider_score"]   = insider_score
+            trade["insider_cluster"] = insider_cluster
         if realised_pnl is not None:
             trade["realised_pnl"] = realised_pnl
             trade["realised_pct"] = realised_pct
 
         self._state["history"].append(trade)
+        # Dual-write to SQLite for cross-session analytics
+        if _DB_AVAILABLE:
+            try:
+                _db.insert_trade(trade)
+            except Exception:
+                pass
         return trade
 
     # ── Portfolio view ─────────────────────────────────────────────────────────

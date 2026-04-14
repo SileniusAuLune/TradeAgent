@@ -28,6 +28,14 @@ from dotenv import load_dotenv
 
 from paper_trader import PaperTrader
 from strategy import StrategyManager, DEFAULT_STRATEGY
+import insider_intel
+
+try:
+    import db as _db
+    _db.init_db()
+    _DB_AVAILABLE = True
+except Exception:
+    _DB_AVAILABLE = False
 
 load_dotenv()
 
@@ -179,6 +187,23 @@ def build_review_prompt(pt: PaperTrader) -> str:
         for e in pause_events:
             lines.append(f"- {e.get('ts','')} | {e.get('reason','')}")
 
+    # Insider activity from Itradedash
+    try:
+        insider_section = insider_intel.get_insider_summary_for_review()
+        if insider_section:
+            lines += ["", insider_section]
+    except Exception:
+        pass
+
+    # Historical context from SQLite (enriches the review significantly)
+    if _DB_AVAILABLE:
+        try:
+            hist = _db.build_historical_context(lookback_days=30)
+            if hist:
+                lines += ["", hist]
+        except Exception:
+            pass
+
     lines += [
         "",
         "---",
@@ -225,6 +250,13 @@ def run_review(
             f.write("---\n\n")
             f.write(report)
         print(f"Saved: {out_path}")
+
+        # Persist to SQLite
+        if _DB_AVAILABLE:
+            try:
+                _db.save_daily_review(report, review_date=today)
+            except Exception:
+                pass
 
     return report
 
@@ -284,12 +316,21 @@ Output ONLY a valid JSON object with these fields (omit any field you would not 
     "market_structure" : <0.5-2.0 | null>,
     "weekly_trend"     : <0.5-2.0 | null>
   },
+  "insider_weight"   : <number 0.0-3.0 | null>,
+  "insider_min_score": <number 20-80   | null>,
   "avoid_symbols"    : [<list of tickers to avoid | null>],
   "preferred_symbols": [<list of tickers to watch | null>],
   "prompt_additions" : "<1-2 sentence strategy rule to add to the agent prompt | null>",
   "rationale"        : "<1 sentence explaining the key changes>",
   "human_summary"    : "<2-3 bullet points the trader can quickly read to decide whether to approve>"
 }
+
+Guidelines for insider_weight:
+- Increase toward 2.0–3.0 if insider signals predicted moves that were missed or validated wins
+- Decrease toward 0.5–1.0 if insider signals triggered entries that underperformed technically
+- Set to 0.0 only if insider data is consistently noise or unavailable
+- insider_min_score: raise if too many weak signals are creating false boosts; lower if top signals
+  are being filtered out
 
 Only suggest changes that are directly supported by the review's findings.
 Do not change parameters that are working well.
@@ -303,6 +344,8 @@ Keep changes conservative — one bad day should not cause radical swings."""
         f"- max_position_pct: {sm.get('max_position_pct', 8.0)}\n"
         f"- max_open_positions: {sm.get('max_open_positions', 5)}\n"
         f"- scanner_weights: {weights}\n"
+        f"- insider_weight: {sm.get('insider_weight', 1.5)}\n"
+        f"- insider_min_score: {sm.get('insider_min_score', 45)}\n"
         f"- prompt_additions: {sm.get('prompt_additions', 'none')}\n\n"
         f"Daily review:\n\n{review_text}\n\n"
         "Output the JSON update object now."
@@ -341,6 +384,17 @@ Keep changes conservative — one bad day should not cause radical swings."""
         }
         if not updates["scanner_weights"]:
             del updates["scanner_weights"]
+
+    # Store proposed updates alongside the review in SQLite
+    if _DB_AVAILABLE:
+        try:
+            _db.save_daily_review(
+                review_text=review_text,
+                strategy_updates=updates,
+                review_date=date.today().isoformat(),
+            )
+        except Exception:
+            pass
 
     return updates
 

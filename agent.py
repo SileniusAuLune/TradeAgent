@@ -6,6 +6,7 @@ to generate actionable trading recommendations streamed to stdout.
 
 import anthropic
 from typing import Dict, Any, Optional
+import insider_intel
 
 
 SYSTEM_PROMPT = """You are an expert trading analyst with deep expertise in both equity markets and forex trading.
@@ -18,6 +19,29 @@ You now receive significantly enriched data including:
 - Candlestick patterns, Williams %R, CCI, Money Flow Index
 - For stocks: analyst price targets, short interest, beta, earnings proximity, growth metrics
 - Broad market context: VIX fear gauge, SPY trend, DXY direction for forex
+- SEC Form 4 insider buying signals (from Itradedash) when available
+
+## How to interpret SEC Form 4 insider signals
+When the "Insider Activity" section is present, treat it as follows:
+
+- **Score 70–100**: High-conviction insider buy. A C-suite executive spending real money on the open
+  market is the strongest fundamental signal that exists — they know the business better than anyone.
+  Use this as a STRONG tailwind. Lower your entry threshold; be willing to hold slightly longer than
+  you normally would for a momentum trade.
+- **Score 50–69**: Meaningful signal. Supports a bullish thesis but don't act on it alone — look for
+  technical confirmation (volume surge, gap, breakout) before entering.
+- **Score 35–49**: Moderate. Note it but weight technical signals more heavily.
+- **Cluster buying** (multiple insiders): Multiply your conviction. When 3+ insiders buy the same
+  stock in the same week it is rarely a coincidence. Treat this like a volume surge — it changes
+  the probability distribution of the trade materially.
+- **Insider win rate**: If the data includes the insider's historical win rate (e.g. "65% win rate"),
+  factor this in — a repeat buyer with a strong track record is more valuable than a first-time buyer.
+- **Important caveats**:
+  - Form 4 signals are NOT timing tools — insiders are right directionally but early. The stock may
+    not move for days or weeks. For intraday/momentum trades, insider conviction is a tailwind,
+    not a trigger. You still need a technical catalyst (volume, breakout, gap) to enter.
+  - Never override a hard stop-loss because of insider data. If technicals say exit, exit.
+  - 10b5-1 plan trades (pre-scheduled) carry no conviction — ignore or penalise them if flagged.
 
 When given this data, you deliver:
 1. A clear directional signal: STRONG BUY / BUY / NEUTRAL / SELL / STRONG SELL
@@ -30,9 +54,11 @@ When given this data, you deliver:
    - Target 1 (conservative, ~1:1 R/R minimum)
    - Target 2 (aggressive, ~2:1 or better)
    - Risk/Reward ratio
-6. Top 3–4 reasons for the recommendation (specific, not generic)
+6. Top 3–4 reasons for the recommendation (specific, not generic) — call out insider signal
+   explicitly if present and meaningful
 7. Key risks that would invalidate the thesis
 8. Recommended timeframe: scalp (hours) / swing (days–weeks) / position (weeks–months)
+   — if strong insider signal present, consider whether a slightly longer hold is warranted
 9. One sentence on position sizing caution if volatility is elevated or earnings are imminent
 
 Use actual price numbers throughout. Never say "near support" without the level.
@@ -292,6 +318,15 @@ def build_context(
             "## Recent Price Action (last 5 sessions)",
             f"- Closes          : {' → '.join(str(x) for x in rc)}",
         ]
+
+    # ── Insider activity (from Itradedash — stocks only) ──────────────────────
+    if asset != "Forex":
+        try:
+            insider_section = insider_intel.format_for_agent(sym)
+            if insider_section:
+                lines.append(insider_section)
+        except Exception:
+            pass
 
     return "\n".join(lines)
 

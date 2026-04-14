@@ -2,3 +2,17 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+
+# Runtime data — not committed; migrate with: python db.py --migrate
+trades.db
+trades.db-wal
+trades.db-shm
+paper_trades.json
+strategy.json
+trade_loop_log.jsonl
+daily_reviews/
+monthly_summaries/
+
+# Virtual environment
+.venv/
+venv/

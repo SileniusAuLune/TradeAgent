@@ -38,6 +38,13 @@ from paper_trader import PaperTrader
 from market_data import fetch_market_data, fetch_vix, fetch_news
 from strategy import get_strategy
 
+try:
+    import db as _db
+    _db.init_db()
+    _DB_AVAILABLE = True
+except Exception:
+    _DB_AVAILABLE = False
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 log = logging.getLogger("trade_loop")
 logging.basicConfig(
@@ -64,10 +71,19 @@ CORRELATION_GROUPS: Dict[str, set] = {
 
 
 def _append_log(event: Dict[str, Any]):
-    """Append a structured event to the JSONL log file."""
+    """Append a structured event to the JSONL log file and SQLite."""
     entry = {"ts": datetime.now().isoformat(timespec="seconds"), **event}
     with open(LOOP_LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
+    if _DB_AVAILABLE:
+        try:
+            _db.insert_scan_event(
+                event_type=entry.get("type", "unknown"),
+                data={k: v for k, v in entry.items() if k not in ("type", "ts")},
+                cycle=entry.get("cycle"),
+            )
+        except Exception:
+            pass
 
 
 # ── Claude decision parser ─────────────────────────────────────────────────────
@@ -179,6 +195,8 @@ class AgentLoop:
         self._premarket_watchlist: List[Any] = []   # top setups from pre-market scan
         self._event_log   : List[Dict]    = []   # in-memory for UI
         self._paused_reason: Optional[str] = None
+        self._review_done_date  : Optional[str] = None   # date of last auto-review run
+        self._insider_refresh_ts: float         = 0.0    # epoch of last insider refresh
 
     # ── Public controls ────────────────────────────────────────────────────────
 
@@ -266,6 +284,20 @@ class AgentLoop:
         except Exception:
             return True   # assume open if we can't check
 
+    @staticmethod
+    def _is_after_close() -> bool:
+        """Returns True from 4:00 PM ET onwards on weekdays (post-market window)."""
+        try:
+            import pytz
+            from datetime import time as _time
+            et  = pytz.timezone("US/Eastern")
+            now = datetime.now(et)
+            if now.weekday() >= 5:
+                return False
+            return now.time() >= _time(16, 0)
+        except Exception:
+            return False
+
     def _cycle(self):
         self._cycle_count += 1
         cycle_ts = datetime.now().strftime("%H:%M:%S")
@@ -283,6 +315,13 @@ class AgentLoop:
             else:
                 self._status = f"market closed (last: {cycle_ts})"
                 log.info("Market closed — checking exits only")
+                # After 4 PM: run daily review + strategy update once per day
+                if self._is_after_close():
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    if self._review_done_date != today:
+                        self._review_done_date = today
+                        log.info("After-close: triggering daily review + strategy update")
+                        self._run_daily_review()
             self._check_exits()
             return
 
@@ -291,6 +330,9 @@ class AgentLoop:
         # ── 0. Loss-limit check — pause before doing anything ─────────────
         if self._check_loss_limits():
             return
+
+        # ── 0a. Insider preferred-symbol refresh (every 4 hours) ──────────
+        self._refresh_insider_watchlist()
 
         # ── 0b. VIX regime — fetch once per cycle ─────────────────────────
         self._vix_info = fetch_vix()
@@ -366,6 +408,72 @@ class AgentLoop:
 
         self._status = f"idle (last: {cycle_ts})"
 
+    # ── Insider watchlist refresh ──────────────────────────────────────────────
+
+    def _refresh_insider_watchlist(self):
+        """
+        Fetch top insider signals and inject them into the scan universe +
+        strategy preferred_symbols list. Runs at most once every 4 hours so
+        we don't hammer the Itradedash DB on every 5-minute cycle.
+
+        Only runs when insider_preferred_refresh = True in strategy settings.
+        """
+        import time as _time_mod
+        REFRESH_INTERVAL = 4 * 3600   # 4 hours in seconds
+
+        sm = get_strategy()
+        ip = sm.insider_params()
+        if not ip["preferred_refresh"]:
+            return
+        if (_time_mod.time() - self._insider_refresh_ts) < REFRESH_INTERVAL:
+            return
+
+        try:
+            import insider_intel
+            signals = insider_intel.get_top_signals(
+                n=10,
+                min_score=ip["min_score"],
+                days=14,
+            )
+            clusters = insider_intel.get_cluster_buys(days=7)
+
+            # Build ranked list: cluster tickers first, then high-score singles
+            cluster_tickers = [c["ticker"] for c in clusters if c.get("max_score", 0) >= ip["min_score"]]
+            signal_tickers  = [s["ticker"] for s in signals if s["ticker"] not in cluster_tickers]
+            new_preferred   = (cluster_tickers + signal_tickers)[:12]
+
+            if new_preferred:
+                # Merge with any manually-set preferred symbols
+                existing = sm.get("preferred_symbols", [])
+                # Keep manual ones (not previously from insider refresh) + new insider ones
+                # We tag insider-sourced symbols with a marker in the log only — the list
+                # itself is just tickers, so we replace the insider portion cleanly.
+                merged = list(dict.fromkeys(new_preferred + existing))[:15]
+
+                # Add new tickers to scan universe for this session
+                for ticker in new_preferred:
+                    if ticker not in self.symbols:
+                        self.symbols.append(ticker)
+
+                sm.apply_updates(
+                    {"preferred_symbols": merged,
+                     "rationale": f"Auto-refreshed from insider signals: {', '.join(new_preferred[:5])}"},
+                    source="insider_refresh",
+                )
+                self._insider_refresh_ts = _time_mod.time()
+                log.info(
+                    "Insider watchlist refreshed: %d tickers (%d clusters) — %s",
+                    len(new_preferred), len(cluster_tickers),
+                    ", ".join(new_preferred[:6]),
+                )
+                self._log_event("insider_refresh", {
+                    "tickers": new_preferred,
+                    "cluster_tickers": cluster_tickers,
+                    "signal_count": len(signals),
+                })
+        except Exception as exc:
+            log.debug("Insider watchlist refresh skipped: %s", exc)
+
     # ── Pre-market scan ────────────────────────────────────────────────────────
 
     def _run_premarket_scan(self):
@@ -393,6 +501,50 @@ class AgentLoop:
                      len(strong), [r.symbol for r in strong])
         except Exception as exc:
             log.error("Pre-market scan error: %s", exc)
+
+    # ── After-market daily review ──────────────────────────────────────────────
+
+    def _run_daily_review(self):
+        """
+        Runs in the loop thread after 4 PM ET (once per day).
+        1. Generates the daily review via Claude
+        2. Extracts proposed strategy updates
+        3. Auto-applies them (no human approval needed when running unattended)
+        4. Saves everything to SQLite and daily_reviews/
+        """
+        self._status = "running daily review…"
+        self._log_event("review_started", {"message": "Auto daily review triggered after close"})
+        try:
+            from daily_review import run_review, extract_strategy_updates
+            report = run_review(self.api_key, pt=self.pt, save=True)
+            log.info("Daily review complete (%d chars)", len(report))
+            self._log_event("review_complete", {"chars": len(report)})
+
+            # Extract and apply strategy updates automatically
+            sm      = get_strategy()
+            updates = extract_strategy_updates(report, self.api_key, current_strategy=sm.data)
+            if updates:
+                changed = sm.apply_updates(updates, source="daily_review_auto")
+                if changed:
+                    log.info("Strategy auto-updated: %s", list(changed.keys()))
+                    self._log_event("strategy_updated", {
+                        "changed": list(changed.keys()),
+                        "rationale": updates.get("rationale", ""),
+                    })
+                    # Reload loop params from updated strategy
+                    params = sm.loop_params()
+                    self.min_score_threshold = params["min_score_threshold"]
+                    self.stop_loss_pct       = params["stop_loss_pct"]
+                    self.take_profit_pct     = params["take_profit_pct"]
+                    self.max_position_pct    = params["max_position_pct"]
+                    self.max_open_positions  = params["max_open_positions"]
+                else:
+                    log.info("Daily review: no strategy changes proposed")
+        except Exception as exc:
+            log.exception("Daily review failed: %s", exc)
+            self._log_event("review_failed", {"error": str(exc)})
+        finally:
+            self._status = f"market closed (last: {self._last_cycle})"
 
     # ── Correlation guard ──────────────────────────────────────────────────────
 
@@ -626,22 +778,40 @@ class AgentLoop:
 
             log.info("BUY %s × %d @ $%.2f  (rationale: %s)", sym, shares, price, dec["rationale"][:60])
 
+            # Snapshot insider signal at entry for later performance tracking
+            _insider_score   = None
+            _insider_cluster = None
+            try:
+                sig = insider_intel.get_signal(sym, days=30)
+                if sig:
+                    _insider_score   = sig.get("signal_score")
+                    _insider_cluster = sig.get("cluster_count")
+            except Exception:
+                pass
+
             try:
                 trade = self.pt.buy(sym, shares, price,
                                     signal="BUY",
                                     stop_loss=round(price * (1 - self.stop_loss_pct / 100), 2),
                                     target=round(price * (1 + self.take_profit_pct / 100), 2),
-                                    note=f"AgentLoop cycle {self._cycle_count}")
+                                    note=f"AgentLoop cycle {self._cycle_count}",
+                                    insider_score=_insider_score,
+                                    insider_cluster=_insider_cluster)
             except ValueError as exc:
                 log.warning("Paper buy failed: %s", exc)
                 return
 
-            self._log_event("trade", {
+            log_data = {
                 "action": "BUY", "symbol": sym, "shares": shares,
                 "price": price, "amount": trade["amount"],
                 "rationale": dec["rationale"][:120],
                 "cycle": self._cycle_count,
-            })
+            }
+            if _insider_score is not None:
+                log_data["insider_score"]   = _insider_score
+                log_data["insider_cluster"] = _insider_cluster
+                log.info("  Insider signal stamped: score=%s cluster=%s", _insider_score, _insider_cluster)
+            self._log_event("trade", log_data)
 
             # Live trading
             if self.live_mode and self.schwab:

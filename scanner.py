@@ -15,6 +15,7 @@ from market_data import (
     fetch_earnings_date, fetch_premarket_price,
 )
 from technical import calculate_indicators
+import insider_intel
 
 
 # ── Default scan universes ─────────────────────────────────────────────────────
@@ -302,6 +303,27 @@ def _enrich_result(r: ScanResult) -> ScanResult:
     elif r.premarket_gap_pct <= -4:
         r.score -= 6
         r.reasons.append(f"Pre-mkt {r.premarket_gap_pct:.1f}% — weak open")
+
+    # ── Insider signal boost (from Itradedash) ────────────────────────────
+    # insider_weight and insider_min_score come from StrategyManager so the
+    # daily review agent can tune how much weight Form 4 signals carry.
+    try:
+        from strategy import get_strategy
+        ip          = get_strategy().insider_params()
+        i_weight    = ip["weight"]       # 0.0 = off, 1.5 = default, 2.0 = primary signal
+        i_min_score = ip["min_score"]    # ignore signals below this threshold
+
+        if i_weight > 0:
+            raw_delta, reason = insider_intel.score_boost(r.symbol)
+            sig = insider_intel.get_signal(r.symbol, days=30)
+            sig_score = sig.get("signal_score", 0) if sig else 0
+
+            if raw_delta > 0 and sig_score >= i_min_score:
+                delta = round(raw_delta * i_weight, 1)
+                r.score += delta
+                r.reasons = [f"🔍 {reason}"] + r.reasons[:4]
+    except Exception:
+        pass
 
     r.score   = round(r.score, 1)
     r.reasons = r.reasons[:5]
