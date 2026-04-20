@@ -98,7 +98,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "  All packages installed." -ForegroundColor Green
 
 # 4. .env file setup
-Write-Host "[4/5] Checking .env configuration..." -ForegroundColor Yellow
+Write-Host "[4/7] Checking .env configuration..." -ForegroundColor Yellow
 
 if (-not (Test-Path $ENV_FILE)) {
     $exampleEnv = Join-Path $REPO_DIR ".env.example"
@@ -123,8 +123,91 @@ if (-not (Test-Path $ENV_FILE)) {
     }
 }
 
+# ── Itradedash insider DB detection ──────────────────────────────────────────
+Write-Host ""
+Write-Host "[5/7] Looking for Itradedash insider signal database..." -ForegroundColor Yellow
+
+$itradedashCandidates = @(
+    (Join-Path (Split-Path $REPO_DIR -Parent) "Itradedash\data\insider_trades.db"),
+    (Join-Path $env:USERPROFILE "Documents\Itradedash\data\insider_trades.db"),
+    (Join-Path $env:USERPROFILE "Itradedash\data\insider_trades.db"),
+    (Join-Path $env:USERPROFILE "Desktop\Itradedash\data\insider_trades.db"),
+    "C:\Itradedash\data\insider_trades.db"
+)
+
+$foundDb = $null
+foreach ($candidate in $itradedashCandidates) {
+    if (Test-Path $candidate) {
+        $foundDb = $candidate
+        break
+    }
+}
+
+# Check if already set in .env
+$envContent = Get-Content $ENV_FILE -Raw -ErrorAction SilentlyContinue
+$alreadySet = $envContent -match "ITRADEDASH_DB=(?!$)(?!\s)"
+
+if ($alreadySet) {
+    Write-Host "  ITRADEDASH_DB already configured in .env" -ForegroundColor Green
+} elseif ($foundDb) {
+    $dbPath = $foundDb.Replace("\", "/")
+    Write-Host "  Found: $dbPath" -ForegroundColor Green
+    $confirm = Read-Host "  Use this path? [Y/n]"
+    if ($confirm -ne "n" -and $confirm -ne "N") {
+        Add-Content $ENV_FILE "`nITRADEDASH_DB=$dbPath"
+        Write-Host "  ITRADEDASH_DB written to .env" -ForegroundColor Green
+    } else {
+        Write-Host "  Skipped — set ITRADEDASH_DB manually in .env when ready." -ForegroundColor Yellow
+        if ($envContent -notmatch "ITRADEDASH_API") {
+            Add-Content $ENV_FILE "`nITRADEDASH_API=http://localhost:8080"
+        }
+    }
+} else {
+    Write-Host "  Itradedash DB not found automatically." -ForegroundColor Yellow
+    Write-Host "  Repo: https://github.com/SileniusAuLune/Itradedash" -ForegroundColor Gray
+    $manual = Read-Host "  Enter path to insider_trades.db (or press Enter to skip)"
+    if ($manual -and (Test-Path $manual)) {
+        $manual = $manual.Replace("\", "/")
+        Add-Content $ENV_FILE "`nITRADEDASH_DB=$manual"
+        Write-Host "  ITRADEDASH_DB written to .env" -ForegroundColor Green
+    } else {
+        Write-Host "  Skipped — will use API fallback (http://localhost:8080)." -ForegroundColor Yellow
+        if ($envContent -notmatch "ITRADEDASH_API") {
+            Add-Content $ENV_FILE "`nITRADEDASH_API=http://localhost:8080"
+        }
+    }
+}
+
+# ── Database init + migration ─────────────────────────────────────────────────
+Write-Host ""
+Write-Host "[6/7] Initialising TradeAgent database..." -ForegroundColor Yellow
+
+# Check for export bundle to import
+$bundles = Get-ChildItem -Path $REPO_DIR -Filter "tradeagent_export_*.json" -ErrorAction SilentlyContinue |
+           Sort-Object Name -Descending
+
+if ($bundles) {
+    $latest = $bundles[0].FullName
+    Write-Host "  Found export bundle: $($bundles[0].Name)" -ForegroundColor Cyan
+    $importConfirm = Read-Host "  Import this bundle? (restores trade history + positions) [Y/n]"
+    if ($importConfirm -ne "n" -and $importConfirm -ne "N") {
+        & $pyExe (Join-Path $REPO_DIR "db.py") --import $latest
+        Write-Host "  Bundle imported." -ForegroundColor Green
+    } else {
+        & $pyExe (Join-Path $REPO_DIR "db.py") --migrate
+    }
+} else {
+    & $pyExe (Join-Path $REPO_DIR "db.py") --migrate
+}
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "  Database ready." -ForegroundColor Green
+} else {
+    Write-Host "  Database init had warnings — check output above." -ForegroundColor Yellow
+}
+
 # 5. Create desktop shortcut
-Write-Host "[5/5] Creating desktop shortcut..." -ForegroundColor Yellow
+Write-Host "[7/7] Creating desktop shortcut..." -ForegroundColor Yellow
 
 $launchScript = Join-Path $REPO_DIR "launch.ps1"
 $desktopPath  = [Environment]::GetFolderPath("Desktop")
