@@ -281,9 +281,12 @@ def import_bundle() -> None:
 # ── Step 6: Verify insider connection ─────────────────────────────────────────
 
 def verify_insider() -> None:
-    # Reload env so the just-written values are picked up
-    from dotenv import load_dotenv
-    load_dotenv(override=True)
+    # Reload env so the just-written values are picked up (best-effort)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except ImportError:
+        pass
 
     result = subprocess.run(
         [PYTHON, "insider_intel.py"],
