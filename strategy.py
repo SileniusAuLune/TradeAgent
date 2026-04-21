@@ -27,7 +27,7 @@ STRATEGY_FILE = Path("strategy.json")
 
 # Bump this whenever DEFAULT_STRATEGY changes significantly.
 # Any saved file with a lower version is auto-reset to the new defaults.
-CURRENT_VERSION = 3
+CURRENT_VERSION = 4
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 DEFAULT_STRATEGY: Dict[str, Any] = {
@@ -37,27 +37,28 @@ DEFAULT_STRATEGY: Dict[str, Any] = {
     "last_updated"     : date.today().isoformat(),
     "update_count"     : 0,
 
-    # ── Fast-money intraday / 1-2 day momentum defaults ───────────────────
-    # Goal: catch 3-8% moves in the SAME session or next day.
-    # Get in on volume/gap/breakout, take profits fast, move on.
-    # Never hold a loser overnight hoping — cut at 1.5% and redeploy.
-    "min_score_threshold" : 60.0,   # only very high conviction setups enter
-    "stop_loss_pct"       : 1.5,    # tight — capital protection above all
-    "take_profit_pct"     : 5.0,    # take money fast; 5% in a day is great
-    "max_position_pct"    : 15.0,   # size up — fewer, bigger, faster
-    "max_open_positions"  : 3,      # 3 focused positions max at once
+    # ── Aggressive short-term momentum defaults ────────────────────────────
+    # Goal: high-turnover, catch 3-6% moves intraday or overnight.
+    # Wide funnel (score 48+) so we see more setups from the broad universe.
+    # Big size (22% per trade), fast profit target (4%), hard stop 1.5%.
+    # 4 concurrent positions — enough diversification, not so many we lose focus.
+    "min_score_threshold" : 48.0,   # wider funnel — catch B+ setups not just A+
+    "stop_loss_pct"       : 1.5,    # cut fast — no holding losers
+    "take_profit_pct"     : 4.0,    # take money quickly, redeploy into next setup
+    "max_position_pct"    : 22.0,   # meaningful size — small lots don't move the needle
+    "max_open_positions"  : 4,      # 4 focused positions at once
 
-    # Scanner weights tuned for INTRADAY momentum:
-    # volume surge + gap = the signal; weekly trend = irrelevant
+    # Scanner weights: volume surge + squeeze = primary signal.
+    # RSI and trend confirm; weekly trend irrelevant for intraday.
     "scanner_weights": {
-        "trend"           : 0.8,    # trend helps but we care more about NOW
-        "adx"             : 0.9,
+        "trend"           : 0.8,
+        "adx"             : 1.0,
         "rsi"             : 1.0,
         "macd"            : 0.9,
-        "volume"          : 2.5,    # volume surge is #1 — follow the money
-        "bb_squeeze"      : 1.5,    # squeeze into volume = explosive move
+        "volume"          : 3.0,    # #1 signal — no volume, no trade
+        "bb_squeeze"      : 2.0,    # coiled spring + volume = explosive entry
         "market_structure": 0.7,
-        "weekly_trend"    : 0.2,    # irrelevant for same-day trades
+        "weekly_trend"    : 0.1,    # irrelevant for same-day/next-day holds
     },
 
     # Universe filters
@@ -66,26 +67,21 @@ DEFAULT_STRATEGY: Dict[str, Any] = {
     "avoid_sectors"      : [],
 
     # ── Insider (Form 4) signal integration ──────────────────────────────
-    # insider_weight: multiplier applied to the raw insider score boost
-    #   1.0 = use boost as-is (up to +20 pts)
-    #   2.0 = double the insider boost — treat it as a primary signal
-    #   0.0 = ignore insider data entirely
-    # insider_min_score: minimum Itradedash signal score to apply ANY boost
-    #   e.g. 50 means ignore weak/noise signals; 35 catches more but adds noise
-    # insider_preferred_refresh: True = auto-populate preferred_symbols from
-    #   top insider signals each trade cycle (hunts what insiders are buying)
-    "insider_weight"             : 1.5,   # insiders are meaningful but secondary to momentum
-    "insider_min_score"          : 45,    # filter out low-conviction Form 4 filings
-    "insider_preferred_refresh"  : True,  # auto-update watchlist from top insider signals
+    "insider_weight"             : 1.5,
+    "insider_min_score"          : 45,
+    "insider_preferred_refresh"  : True,
 
-    # Claude is briefed as an intraday momentum trader
+    # Claude briefed as an aggressive short-term momentum trader
     "prompt_additions"   : (
-        "FAST MONEY strategy: target 3-8% gains in the SAME session or next day. "
-        "ONLY trade on: (1) volume surge 2x+ above average, (2) gap-up catalyst, "
-        "or (3) breakout on high volume. "
-        "Do NOT trade setups with volume below average — no volume = no move. "
-        "Enter only if price is actively moving. Exit same day or next open. "
-        "Stop at 1.5% — never hold a loser. Redeploy capital into the next setup immediately."
+        "AGGRESSIVE SHORT-TERM strategy: high turnover, target 3-6% per trade. "
+        "ENTRY rules — all three must hold: "
+        "(1) volume surge 2x+ above 20-day average, "
+        "(2) price actively moving (not consolidating), "
+        "(3) clear near-term catalyst or breakout level. "
+        "SIZE UP on high-conviction setups — use 15-22% of equity per trade. "
+        "EXITS: take profit at 4%, stop hard at 1.5%, no exceptions. "
+        "If a position is flat after 2 hours, exit — dead capital kills returns. "
+        "Redeploy into the next setup immediately. Never hold a loser overnight."
     ),
 
     # Change history

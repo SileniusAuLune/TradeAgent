@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 
 import anthropic
 
-from scanner import run_scan, build_scan_prompt, UNIVERSE_MOMENTUM, ScanResult
+from scanner import run_scan, build_scan_prompt, UNIVERSE_MOMENTUM, UNIVERSE_BROAD, ScanResult
 from paper_trader import PaperTrader
 from market_data import fetch_market_data, fetch_vix, fetch_news
 from strategy import get_strategy
@@ -168,7 +168,7 @@ class AgentLoop:
     ):
         self.api_key             = api_key
         self.pt                  = paper_trader or PaperTrader()
-        self.symbols             = symbols or UNIVERSE_MOMENTUM
+        self.symbols             = symbols or UNIVERSE_BROAD
         self.interval            = interval
         self.min_score_threshold = min_score_threshold
         self.max_open_positions  = max_open_positions

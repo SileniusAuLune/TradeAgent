@@ -1019,9 +1019,11 @@ with tab_loop:
                                            help="Lock in 50% gains at half the take-profit target, trail the rest")
 
         _universe_opts = ["Top Daily Movers (auto)"] + list(UNIVERSES.keys())
+        _universe_default_idx = _universe_opts.index("Broad (all universes)") if "Broad (all universes)" in _universe_opts else 0
         cfg_universe    = st.selectbox(
             "Scan universe",
             _universe_opts,
+            index=_universe_default_idx,
             key="cfg_universe",
             help=(
                 "Top Daily Movers fetches Yahoo Finance's most-active list each cycle — "
