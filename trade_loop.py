@@ -286,7 +286,7 @@ class AgentLoop:
 
     @staticmethod
     def _is_after_close() -> bool:
-        """Returns True from 4:00 PM ET onwards on weekdays (post-market window)."""
+        """Returns True from 4:30 PM ET onwards on weekdays (post-market window)."""
         try:
             import pytz
             from datetime import time as _time
@@ -294,7 +294,7 @@ class AgentLoop:
             now = datetime.now(et)
             if now.weekday() >= 5:
                 return False
-            return now.time() >= _time(16, 0)
+            return now.time() >= _time(16, 30)
         except Exception:
             return False
 
