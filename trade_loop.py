@@ -197,6 +197,7 @@ class AgentLoop:
         self._paused_reason: Optional[str] = None
         self._review_done_date  : Optional[str] = None   # date of last auto-review run
         self._insider_refresh_ts: float         = 0.0    # epoch of last insider refresh
+        self._movers_refresh_ts : float         = 0.0    # epoch of last top-movers merge
 
     # ── Public controls ────────────────────────────────────────────────────────
 
@@ -331,10 +332,13 @@ class AgentLoop:
         if self._check_loss_limits():
             return
 
-        # ── 0a. Insider preferred-symbol refresh (every 4 hours) ──────────
+        # ── 0a. Top-movers merge (every 30 min) ──────────────────────────────
+        self._refresh_top_movers()
+
+        # ── 0b. Insider preferred-symbol refresh (every 4 hours) ──────────
         self._refresh_insider_watchlist()
 
-        # ── 0b. VIX regime — fetch once per cycle ─────────────────────────
+        # ── 0c. VIX regime — fetch once per cycle ─────────────────────────
         self._vix_info = fetch_vix()
         vix_regime = self._vix_info.get("regime", "unknown")
         if vix_regime == "extreme_fear":
@@ -407,6 +411,39 @@ class AgentLoop:
             self._execute(dec, equity, cash)
 
         self._status = f"idle (last: {cycle_ts})"
+
+    # ── Top-movers refresh ────────────────────────────────────────────────────
+
+    def _refresh_top_movers(self):
+        """
+        Fetch Yahoo Finance's most-active tickers every 30 minutes and merge
+        them into the scan universe. Keeps the list unconstrained — whatever
+        is actually moving today gets added automatically.
+        """
+        import time as _time_mod
+        REFRESH_INTERVAL = 30 * 60   # 30 minutes
+
+        if (_time_mod.time() - self._movers_refresh_ts) < REFRESH_INTERVAL:
+            return
+
+        try:
+            from scanner import fetch_top_movers
+            movers = fetch_top_movers(n=30)
+            added = [s for s in movers if s not in self.symbols]
+            if added:
+                self.symbols.extend(added)
+                log.info("Top-movers merged: +%d tickers (%s…) → %d total",
+                         len(added), ", ".join(added[:6]), len(self.symbols))
+                self._log_event("movers_refresh", {
+                    "added": added,
+                    "total_universe": len(self.symbols),
+                })
+            else:
+                log.debug("Top-movers refresh: no new tickers (universe already covers them)")
+        except Exception as exc:
+            log.debug("Top-movers refresh failed: %s", exc)
+        finally:
+            self._movers_refresh_ts = _time_mod.time()
 
     # ── Insider watchlist refresh ──────────────────────────────────────────────
 
