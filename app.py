@@ -1249,6 +1249,22 @@ with tab_review:
         "You approve before anything is applied. Best run after market close (4 PM ET)."
     )
 
+    # Auto-load the most recent past review if none has been run this session
+    if not st.session_state.get("last_review"):
+        _past = list_past_reviews()
+        if _past:
+            try:
+                _auto_content = _past[0].read_text(encoding="utf-8", errors="replace")
+                st.session_state["last_review"] = _auto_content
+                _auto_label = _past[0].stem   # e.g. "2026-04-20"
+                st.info(
+                    f"Auto-review from **{_auto_label}** loaded. "
+                    "You can run a fresh review below, or scroll down to Past Reviews.",
+                    icon="📋",
+                )
+            except Exception:
+                pass
+
     # ── Market close countdown ─────────────────────────────────────────────
     try:
         et_now   = datetime.now(pytz.timezone("US/Eastern"))
