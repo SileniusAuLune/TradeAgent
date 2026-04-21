@@ -128,7 +128,11 @@ Write-Host ""
 Write-Host "[5/7] Looking for Itradedash insider signal database..." -ForegroundColor Yellow
 
 $itradedashCandidates = @(
+    # Primary: Documents\Code\ sibling layout (preferred clone location)
+    (Join-Path $env:USERPROFILE "Documents\Code\Itradedash\data\insider_trades.db"),
+    # Generic sibling layout (TradeAgent and Itradedash in same parent folder)
     (Join-Path (Split-Path $REPO_DIR -Parent) "Itradedash\data\insider_trades.db"),
+    # Flat Documents layout
     (Join-Path $env:USERPROFILE "Documents\Itradedash\data\insider_trades.db"),
     (Join-Path $env:USERPROFILE "Itradedash\data\insider_trades.db"),
     (Join-Path $env:USERPROFILE "Desktop\Itradedash\data\insider_trades.db"),

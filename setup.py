@@ -112,9 +112,11 @@ def check_anthropic(env: dict) -> dict:
 # Ordered list of paths to probe (most likely first).
 # {user} is replaced with the current user's home directory.
 _ITRADEDASH_CANDIDATES = [
-    # Same parent directory as TradeAgent (typical sibling-repo layout)
+    # Primary: Documents/Code/ sibling layout (preferred clone location)
+    Path.home() / "Documents" / "Code" / "Itradedash" / "data" / "insider_trades.db",
+    # Same parent directory as TradeAgent (generic sibling-repo layout)
     Path(__file__).parent.parent / "Itradedash" / "data" / "insider_trades.db",
-    # Windows Documents folder
+    # Windows Documents folder (flat layout)
     Path.home() / "Documents" / "Itradedash" / "data" / "insider_trades.db",
     # Home root
     Path.home() / "Itradedash" / "data" / "insider_trades.db",
